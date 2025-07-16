@@ -47,10 +47,10 @@ class TrainingConfig:
     logging_steps: int = 100
     load_in_8bit: bool = True
     use_wandb: bool = True
-    num_samples: Optional[int] = 1024,  # None for all data
+    num_samples: Optional[int] = 1024
 
-    eval_accumulation_steps: int = 10,
-    predict_with_generate: bool = False,
+    eval_accumulation_steps: int = 10
+    predict_with_generate: bool = False
 
     # LoRA parameters
     lora_r: int = 16
