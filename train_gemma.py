@@ -384,11 +384,11 @@ def main():
         num_samples=1024,
         load_in_8bit=True,
 
-        save_steps=100,
-        eval_steps=10,
-        logging_steps=10,
+        save_steps=10,
+        eval_steps=2,
+        logging_steps=2,
 
-        eval_accumulation_steps=10,
+        eval_accumulation_steps=4,
         predict_with_generate=True,
     )
 
