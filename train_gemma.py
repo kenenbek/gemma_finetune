@@ -136,9 +136,9 @@ class KyrgyzSpellCheckTrainer:
                 llm_int8_has_fp16_weight=False,
             )
             model_kwargs["quantization_config"] = quantization_config
-            # Fix device mapping for training with 8-bit quantization
+            # Use only GPU 0 for training
             if torch.cuda.is_available():
-                model_kwargs["device_map"] = {"": torch.cuda.current_device()}
+                model_kwargs["device_map"] = {"": 0}  # Force GPU 0
             else:
                 model_kwargs["device_map"] = {"": "cpu"}
             model_kwargs["torch_dtype"] = torch.float16
