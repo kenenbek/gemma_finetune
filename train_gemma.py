@@ -383,7 +383,7 @@ def main():
         learning_rate=5e-5,
         max_length=512,
         use_wandb=False,
-        num_samples=512,
+        num_samples=64,
         load_in_8bit=True,
 
         save_steps=10,
