@@ -272,6 +272,8 @@ class KyrgyzSpellCheckTrainer:
 
     def compute_metrics(self, eval_pred):
         print("kotok")
+        print("kotok")
+        print("kotok")
         """Compute evaluation metrics."""
         predictions, labels = eval_pred
 
