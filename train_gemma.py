@@ -219,7 +219,8 @@ class KyrgyzSpellCheckTrainer:
             remove_unused_columns=False,
             dataloader_pin_memory=False,
             fp16=True,
-            eval_accumulation_steps=self.config.eval_accumulation_steps,
+            eval_accumulation_steps=1024,
+            prediction_loss_only=True,
             report_to="wandb" if self.config.use_wandb else None,
             run_name=f"kyrgyz-spellcheck-{self.config.model_name.split('/')[-1]}"
         )
