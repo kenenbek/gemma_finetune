@@ -47,7 +47,10 @@ class TrainingConfig:
     logging_steps: int = 100
     load_in_8bit: bool = True
     use_wandb: bool = True
-    num_samples: Optional[int] = 1024  # None for all data
+    num_samples: Optional[int] = 1024,  # None for all data
+
+    eval_accumulation_steps: int = 10,
+    predict_with_generate: bool = False,
 
     # LoRA parameters
     lora_r: int = 16
@@ -379,7 +382,13 @@ def main():
         max_length=512,
         use_wandb=True,
         num_samples=1024,
-        load_in_8bit=True,  # Disable 8-bit quantization
+        load_in_8bit=True,
+        save_steps=500,
+        eval_steps=50,
+        logging_steps=100,
+
+        eval_accumulation_steps=10,
+        predict_with_generate=True,
     )
 
     # Initialize trainer
