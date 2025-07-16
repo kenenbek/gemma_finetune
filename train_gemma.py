@@ -17,7 +17,7 @@ from peft import LoraConfig, get_peft_model, TaskType
 import os
 import json
 import logging
-from typing import List, Optional
+from typing import List, Optional, Literal
 from dataclasses import dataclass
 import wandb
 import jiwer
@@ -28,39 +28,88 @@ from data import KyrgyzDataLoader
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+@dataclass
+class ModelConfig:
+    """Configuration for model settings."""
+    model_name: str = "google/gemma-3-1b-it"
+    max_length: int = 512
+    use_quantization: bool = False
+    attn_implementation: str = "eager"
+
+
+@dataclass
+class LoRAConfig:
+    """Configuration for LoRA settings."""
+    r: int = 16
+    lora_alpha: int = 32
+    target_modules: List[str] = None
+    lora_dropout: float = 0.1
+    bias: Literal["none", "all", "lora_only"] = "none"
+
+    def __post_init__(self):
+        if self.target_modules is None:
+            self.target_modules = [
+                "q_proj", "v_proj", "k_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj"
+            ]
+
+
+@dataclass
+class DataConfig:
+    """Configuration for dataset settings."""
+    dataset_path: str = "../misspelled_kg_dataset/"
+    num_samples: Optional[int] = 512
+    max_length: int = 512
+
+
 @dataclass
 class TrainingConfig:
-    """Configuration for training parameters."""
-    model_name: str = "google/gemma-3-1b-it"
-    dataset_path: str = "../misspelled_kg_dataset/"
+    """Configuration for training settings."""
     output_dir: str = "./kyrgyz_spellcheck_model"
     num_train_epochs: int = 10
-    per_device_train_batch_size: int = 8
-    per_device_eval_batch_size: int = 4
-    gradient_accumulation_steps: int = 4
+    per_device_train_batch_size: int = 1
+    per_device_eval_batch_size: int = 1
+    gradient_accumulation_steps: int = 1
     learning_rate: float = 5e-5
     weight_decay: float = 0.01
     warmup_steps: int = 100
-    max_length: int = 512
-    save_steps: int = 500
-    eval_steps: int = 50
-    logging_steps: int = 100
-    load_in_8bit: bool = True
-    use_wandb: bool = True
-    num_samples: Optional[int] = 1024
+    logging_steps: int = 10
+    save_steps: int = 50
+    eval_steps: int = 2
+    save_total_limit: int = 3
+    fp16: bool = True
+    eval_accumulation_steps: int = 1024
+    use_wandb: bool = False
+    run_name: str = "kyrgyz-spellcheck-gemma"
 
-    eval_accumulation_steps: int = 10
-    predict_with_generate: bool = False
 
-    # LoRA parameters
-    lora_r: int = 16
-    lora_alpha: int = 32
-    lora_dropout: float = 0.1
-    lora_target_modules: List[str] = None
+@dataclass
+class ExperimentConfig:
+    """Main configuration class that combines all configs."""
+    model: ModelConfig
+    lora: LoRAConfig
+    data: DataConfig
+    training: TrainingConfig
 
-    def __post_init__(self):
-        if self.lora_target_modules is None:
-            self.lora_target_modules = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+    @classmethod
+    def from_dict(cls, config_dict: dict):
+        """Create config from dictionary."""
+        return cls(
+            model=ModelConfig(**config_dict.get("model", {})),
+            lora=LoRAConfig(**config_dict.get("lora", {})),
+            data=DataConfig(**config_dict.get("data", {})),
+            training=TrainingConfig(**config_dict.get("training", {}))
+        )
+
+    def to_dict(self):
+        """Convert config to dictionary."""
+        return {
+            "model": self.model.__dict__,
+            "lora": self.lora.__dict__,
+            "data": self.data.__dict__,
+            "training": self.training.__dict__
+        }
 
 
 class KyrgyzSpellCheckDataset(Dataset):
@@ -102,7 +151,7 @@ class KyrgyzSpellCheckDataset(Dataset):
 class KyrgyzSpellCheckTrainer:
     """Trainer class for Kyrgyz spell checking model."""
 
-    def __init__(self, config: TrainingConfig):
+    def __init__(self, config: ExperimentConfig):
         self.config = config
         self.tokenizer = None
         self.model = None
@@ -112,8 +161,8 @@ class KyrgyzSpellCheckTrainer:
 
     def setup_tokenizer(self):
         """Initialize the tokenizer."""
-        logger.info(f"Loading tokenizer: {self.config.model_name}")
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
+        logger.info(f"Loading tokenizer: {self.config.model.model_name}")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model.model_name)
 
         # Add padding token if not present
         if self.tokenizer.pad_token is None:
@@ -123,38 +172,34 @@ class KyrgyzSpellCheckTrainer:
 
     def setup_model(self):
         """Initialize the model with LoRA configuration."""
-        logger.info(f"Loading model: {self.config.model_name}")
+        logger.info(f"Loading model: {self.config.model.model_name}")
 
         # Load model with quantization if specified
         model_kwargs = {
-            "attn_implementation": "eager"
+            "attn_implementation": self.config.model.attn_implementation
         }
-        if self.config.load_in_8bit:
+
+        if self.config.model.use_quantization:
             quantization_config = BitsAndBytesConfig(
-                load_in_8bit=True,
-                llm_int8_threshold=6.0,
-                llm_int8_has_fp16_weight=False,
+                load_in_4bit=True,
+                bnb_4bit_compute_dtype=torch.float16,
+                bnb_4bit_use_double_quant=True,
+                bnb_4bit_quant_type="nf4"
             )
             model_kwargs["quantization_config"] = quantization_config
-            # Use only GPU 0 for training
-            if torch.cuda.is_available():
-                model_kwargs["device_map"] = {"": 0}  # Force GPU 0
-            else:
-                model_kwargs["device_map"] = {"": "cpu"}
-            model_kwargs["torch_dtype"] = torch.float16
 
         self.model = AutoModelForCausalLM.from_pretrained(
-            self.config.model_name,
+            self.config.model.model_name,
             **model_kwargs
         )
 
         # Setup LoRA configuration
         lora_config = LoraConfig(
-            r=self.config.lora_r,
-            lora_alpha=self.config.lora_alpha,
-            target_modules=self.config.lora_target_modules,
-            lora_dropout=self.config.lora_dropout,
-            bias="none",
+            r=self.config.lora.r,
+            lora_alpha=self.config.lora.lora_alpha,
+            target_modules=self.config.lora.target_modules,
+            lora_dropout=self.config.lora.lora_dropout,
+            bias=self.config.lora.bias,
             task_type=TaskType.CAUSAL_LM,
         )
 
@@ -171,24 +216,24 @@ class KyrgyzSpellCheckTrainer:
         # Load data using the existing data loader
         loader = KyrgyzDataLoader()
         splits = loader.load_from_hf_dataset(
-            self.config.dataset_path,
-            num_samples=self.config.num_samples
+            self.config.data.dataset_path,
+            num_samples=self.config.data.num_samples
         )
 
         # Create datasets
         self.train_dataset = KyrgyzSpellCheckDataset(
             splits['train'][0], splits['train'][1],
-            self.tokenizer, self.config.max_length
+            self.tokenizer, self.config.data.max_length
         )
 
         self.val_dataset = KyrgyzSpellCheckDataset(
             splits['val'][0], splits['val'][1],
-            self.tokenizer, self.config.max_length
+            self.tokenizer, self.config.data.max_length
         )
 
         self.test_dataset = KyrgyzSpellCheckDataset(
             splits['test'][0], splits['test'][1],
-            self.tokenizer, self.config.max_length
+            self.tokenizer, self.config.data.max_length
         )
 
         logger.info(f"Datasets loaded:")
@@ -199,30 +244,30 @@ class KyrgyzSpellCheckTrainer:
     def setup_training_arguments(self):
         """Setup training arguments."""
         return TrainingArguments(
-            output_dir=self.config.output_dir,
-            num_train_epochs=self.config.num_train_epochs,
-            per_device_train_batch_size=self.config.per_device_train_batch_size,
-            per_device_eval_batch_size=self.config.per_device_eval_batch_size,
-            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
-            learning_rate=self.config.learning_rate,
-            weight_decay=self.config.weight_decay,
-            warmup_steps=self.config.warmup_steps,
-            logging_steps=self.config.logging_steps,
-            save_steps=self.config.save_steps,
-            eval_steps=self.config.eval_steps,
+            output_dir=self.config.training.output_dir,
+            num_train_epochs=self.config.training.num_train_epochs,
+            per_device_train_batch_size=self.config.training.per_device_train_batch_size,
+            per_device_eval_batch_size=self.config.training.per_device_eval_batch_size,
+            gradient_accumulation_steps=self.config.training.gradient_accumulation_steps,
+            learning_rate=self.config.training.learning_rate,
+            weight_decay=self.config.training.weight_decay,
+            warmup_steps=self.config.training.warmup_steps,
+            logging_steps=self.config.training.logging_steps,
+            save_steps=self.config.training.save_steps,
+            eval_steps=self.config.training.eval_steps,
             eval_strategy="steps",
             save_strategy="steps",
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
             greater_is_better=False,
-            save_total_limit=3,
+            save_total_limit=self.config.training.save_total_limit,
             remove_unused_columns=False,
             dataloader_pin_memory=False,
-            fp16=True,
-            eval_accumulation_steps=1024,
+            fp16=self.config.training.fp16,
+            eval_accumulation_steps=self.config.training.eval_accumulation_steps,
             prediction_loss_only=True,
-            report_to="wandb" if self.config.use_wandb else None,
-            run_name=f"kyrgyz-spellcheck-{self.config.model_name.split('/')[-1]}"
+            report_to="wandb" if self.config.training.use_wandb else None,
+            run_name=self.config.training.run_name
         )
 
     def compute_metrics(self, eval_pred):
@@ -285,11 +330,11 @@ class KyrgyzSpellCheckTrainer:
         self.load_data()
 
         # Initialize wandb if enabled
-        if self.config.use_wandb:
+        if self.config.training.use_wandb:
             wandb.init(
                 project="kyrgyz-spellcheck",
-                config=self.config.__dict__,
-                name=f"gemma-kyrgyz-spellcheck-{self.config.num_train_epochs}epochs"
+                config=self.config.to_dict(),
+                name=f"gemma-kyrgyz-spellcheck-{self.config.training.num_train_epochs}epochs"
             )
 
         # Setup training arguments
@@ -318,7 +363,7 @@ class KyrgyzSpellCheckTrainer:
         # Save the final model
         logger.info("Saving final model...")
         trainer.save_model()
-        self.tokenizer.save_pretrained(self.config.output_dir)
+        self.tokenizer.save_pretrained(self.config.training.output_dir)
 
         # Final evaluation
         logger.info("Running final evaluation...")
@@ -330,10 +375,10 @@ class KyrgyzSpellCheckTrainer:
         logger.info(f"Test results: {test_results}")
 
         # Save training config
-        with open(os.path.join(self.config.output_dir, "training_config.json"), "w") as f:
-            json.dump(self.config.__dict__, f, indent=2)
+        with open(os.path.join(self.config.training.output_dir, "training_config.json"), "w") as f:
+            json.dump(self.config.to_dict(), f, indent=2)
 
-        if self.config.use_wandb:
+        if self.config.training.use_wandb:
             wandb.log({"final_eval": eval_results, "test_results": test_results})
             wandb.finish()
 
@@ -370,29 +415,45 @@ class KyrgyzSpellCheckTrainer:
 
 
 def main():
-    """Main function to run training."""
-    # Configuration
-    config = TrainingConfig(
-        model_name="google/gemma-3-1b-it",
-        dataset_path="../misspelled_kg_dataset/",
-        output_dir="./kyrgyz_gemma_spellcheck",
-        num_train_epochs=10,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        gradient_accumulation_steps=1,
-        learning_rate=5e-5,
-        max_length=512,
-        use_wandb=False,
-        num_samples=64,
-        load_in_8bit=True,
-
-        save_steps=10,
-        eval_steps=2,
-        logging_steps=2,
-
-        eval_accumulation_steps=1,
-        predict_with_generate=True,
+    config = ExperimentConfig(
+        model=ModelConfig(
+            model_name="google/gemma-3-1b-it",
+            max_length=512,
+            use_quantization=False,
+            attn_implementation="eager"
+        ),
+        lora=LoRAConfig(
+            r=16,
+            lora_alpha=32,
+            target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+            lora_dropout=0.1,
+            bias="none"
+        ),
+        data=DataConfig(
+            dataset_path="../misspelled_kg_dataset/",
+            num_samples=512,
+            max_length=512
+        ),
+        training=TrainingConfig(
+            output_dir="./kyrgyz_spellcheck_model",
+            num_train_epochs=10,
+            per_device_train_batch_size=1,
+            per_device_eval_batch_size=1,
+            gradient_accumulation_steps=1,
+            learning_rate=5e-5,
+            weight_decay=0.01,
+            warmup_steps=100,
+            logging_steps=10,
+            save_steps=50,
+            eval_steps=2,
+            save_total_limit=3,
+            fp16=True,
+            eval_accumulation_steps=1024,
+            use_wandb=False,
+            run_name="kyrgyz-spellcheck-gemma"
+        )
     )
+
 
     # Initialize trainer
     trainer = KyrgyzSpellCheckTrainer(config)
