@@ -382,8 +382,8 @@ def main():
         gradient_accumulation_steps=4,
         learning_rate=5e-5,
         max_length=512,
-        use_wandb=True,
-        num_samples=1024,
+        use_wandb=False,
+        num_samples=512,
         load_in_8bit=True,
 
         save_steps=10,
