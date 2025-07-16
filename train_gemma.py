@@ -1,0 +1,387 @@
+"""
+Finetuning procedure for Gemma-3-1B-IT for Kyrgyz spell checking.
+Uses LoRA (Low-Rank Adaptation) for efficient finetuning.
+"""
+
+import torch
+from torch.utils.data import Dataset
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    TrainingArguments,
+    Trainer,
+    DataCollatorForLanguageModeling
+)
+from peft import LoraConfig, get_peft_model, TaskType
+import os
+import json
+import logging
+from typing import List, Optional
+from dataclasses import dataclass
+import wandb
+import jiwer
+import numpy as np
+from data import KyrgyzDataLoader
+
+# Set up logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+@dataclass
+class TrainingConfig:
+    """Configuration for training parameters."""
+    model_name: str = "google/gemma-3-1b-it"
+    dataset_path: str = "../misspelled_kg_dataset/"
+    output_dir: str = "./kyrgyz_spellcheck_model"
+    num_train_epochs: int = 3
+    per_device_train_batch_size: int = 4
+    per_device_eval_batch_size: int = 4
+    gradient_accumulation_steps: int = 4
+    learning_rate: float = 2e-4
+    weight_decay: float = 0.01
+    warmup_steps: int = 100
+    max_length: int = 512
+    save_steps: int = 500
+    eval_steps: int = 500
+    logging_steps: int = 100
+    load_in_8bit: bool = True
+    use_wandb: bool = False
+    num_samples: Optional[int] = None  # None for all data
+
+    # LoRA parameters
+    lora_r: int = 16
+    lora_alpha: int = 32
+    lora_dropout: float = 0.1
+    lora_target_modules: List[str] = None
+
+    def __post_init__(self):
+        if self.lora_target_modules is None:
+            self.lora_target_modules = ["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+
+class KyrgyzSpellCheckDataset(Dataset):
+    """Dataset class for Kyrgyz spell checking formatted for instruction tuning."""
+
+    def __init__(self, misspelled_texts: List[str], correct_texts: List[str], tokenizer, max_length: int = 512):
+        self.misspelled = misspelled_texts
+        self.correct = correct_texts
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.misspelled)
+
+    def __getitem__(self, idx):
+        misspelled = self.misspelled[idx]
+        correct = self.correct[idx]
+
+        # Format as instruction-following task
+        instruction = "Correct the spelling mistakes in the following Kyrgyz text:"
+        prompt = f"<start_of_turn>user\n{instruction}\n{misspelled}<end_of_turn>\n<start_of_turn>model\n{correct}<end_of_turn>"
+
+        # Tokenize
+        encoded = self.tokenizer(
+            prompt,
+            truncation=True,
+            padding="max_length",
+            max_length=self.max_length,
+            return_tensors="pt"
+        )
+
+        return {
+            "input_ids": encoded["input_ids"].flatten(),
+            "attention_mask": encoded["attention_mask"].flatten(),
+            "labels": encoded["input_ids"].flatten()
+        }
+
+
+class KyrgyzSpellCheckTrainer:
+    """Trainer class for Kyrgyz spell checking model."""
+
+    def __init__(self, config: TrainingConfig):
+        self.config = config
+        self.tokenizer = None
+        self.model = None
+        self.train_dataset = None
+        self.val_dataset = None
+        self.test_dataset = None
+
+    def setup_tokenizer(self):
+        """Initialize the tokenizer."""
+        logger.info(f"Loading tokenizer: {self.config.model_name}")
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config.model_name)
+
+        # Add padding token if not present
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        logger.info(f"Tokenizer loaded. Vocab size: {len(self.tokenizer)}")
+
+    def setup_model(self):
+        """Initialize the model with LoRA configuration."""
+        logger.info(f"Loading model: {self.config.model_name}")
+
+        # Load model with quantization if specified
+        model_kwargs = {}
+        if self.config.load_in_8bit:
+            model_kwargs["load_in_8bit"] = True
+            model_kwargs["device_map"] = "auto"
+            model_kwargs["torch_dtype"] = torch.float16
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.config.model_name,
+            **model_kwargs
+        )
+
+        # Setup LoRA configuration
+        lora_config = LoraConfig(
+            r=self.config.lora_r,
+            lora_alpha=self.config.lora_alpha,
+            target_modules=self.config.lora_target_modules,
+            lora_dropout=self.config.lora_dropout,
+            bias="none",
+            task_type=TaskType.CAUSAL_LM,
+        )
+
+        # Apply LoRA
+        self.model = get_peft_model(self.model, lora_config)
+        self.model.print_trainable_parameters()
+
+        logger.info("Model setup complete with LoRA configuration")
+
+    def load_data(self):
+        """Load and prepare datasets."""
+        logger.info("Loading Kyrgyz spell checking dataset...")
+
+        # Load data using the existing data loader
+        loader = KyrgyzDataLoader()
+        splits = loader.load_from_hf_dataset(
+            self.config.dataset_path,
+            num_samples=self.config.num_samples
+        )
+
+        # Create datasets
+        self.train_dataset = KyrgyzSpellCheckDataset(
+            splits['train'][0], splits['train'][1],
+            self.tokenizer, self.config.max_length
+        )
+
+        self.val_dataset = KyrgyzSpellCheckDataset(
+            splits['val'][0], splits['val'][1],
+            self.tokenizer, self.config.max_length
+        )
+
+        self.test_dataset = KyrgyzSpellCheckDataset(
+            splits['test'][0], splits['test'][1],
+            self.tokenizer, self.config.max_length
+        )
+
+        logger.info(f"Datasets loaded:")
+        logger.info(f"  Train: {len(self.train_dataset)} samples")
+        logger.info(f"  Validation: {len(self.val_dataset)} samples")
+        logger.info(f"  Test: {len(self.test_dataset)} samples")
+
+    def setup_training_arguments(self):
+        """Setup training arguments."""
+        return TrainingArguments(
+            output_dir=self.config.output_dir,
+            num_train_epochs=self.config.num_train_epochs,
+            per_device_train_batch_size=self.config.per_device_train_batch_size,
+            per_device_eval_batch_size=self.config.per_device_eval_batch_size,
+            gradient_accumulation_steps=self.config.gradient_accumulation_steps,
+            learning_rate=self.config.learning_rate,
+            weight_decay=self.config.weight_decay,
+            warmup_steps=self.config.warmup_steps,
+            logging_steps=self.config.logging_steps,
+            save_steps=self.config.save_steps,
+            eval_steps=self.config.eval_steps,
+            evaluation_strategy="steps",
+            save_strategy="steps",
+            load_best_model_at_end=True,
+            metric_for_best_model="eval_loss",
+            greater_is_better=False,
+            save_total_limit=3,
+            remove_unused_columns=False,
+            dataloader_pin_memory=False,
+            fp16=True,
+            report_to="wandb" if self.config.use_wandb else None,
+            run_name=f"kyrgyz-spellcheck-{self.config.model_name.split('/')[-1]}",
+        )
+
+    def compute_metrics(self, eval_pred):
+        """Compute evaluation metrics."""
+        predictions, labels = eval_pred
+
+        # Decode predictions and labels
+        decoded_preds = self.tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        decoded_labels = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
+
+        # Extract corrected text from model outputs
+        corrected_texts = []
+        reference_texts = []
+
+        for pred, label in zip(decoded_preds, decoded_labels):
+            # Extract the corrected text after the model response
+            try:
+                pred_text = pred.split("<start_of_turn>model\n")[-1].split("<end_of_turn>")[0].strip()
+                label_text = label.split("<start_of_turn>model\n")[-1].split("<end_of_turn>")[0].strip()
+                corrected_texts.append(pred_text)
+                reference_texts.append(label_text)
+            except:
+                corrected_texts.append(pred)
+                reference_texts.append(label)
+
+        # Calculate metrics
+        exact_match = sum(1 for p, r in zip(corrected_texts, reference_texts) if p == r) / len(corrected_texts)
+
+        # Calculate character-level accuracy
+        char_accuracy = []
+        for pred, ref in zip(corrected_texts, reference_texts):
+            if len(ref) > 0:
+                char_acc = 1 - jiwer.cer(ref, pred)
+                char_accuracy.append(max(0.0, char_acc))
+            else:
+                char_accuracy.append(1.0 if len(pred) == 0 else 0.0)
+
+        return {
+            "exact_match": exact_match,
+            "character_accuracy": np.mean(char_accuracy)
+        }
+
+    def train(self):
+        """Main training function."""
+        logger.info("Starting training setup...")
+
+        # Setup components
+        self.setup_tokenizer()
+        self.setup_model()
+        self.load_data()
+
+        # Initialize wandb if enabled
+        if self.config.use_wandb:
+            wandb.init(
+                project="kyrgyz-spellcheck",
+                config=self.config.__dict__,
+                name=f"gemma-kyrgyz-spellcheck-{self.config.num_train_epochs}epochs"
+            )
+
+        # Setup training arguments
+        training_args = self.setup_training_arguments()
+
+        # Data collator
+        data_collator = DataCollatorForLanguageModeling(
+            tokenizer=self.tokenizer,
+            mlm=False,
+        )
+
+        # Initialize trainer
+        trainer = Trainer(
+            model=self.model,
+            args=training_args,
+            train_dataset=self.train_dataset,
+            eval_dataset=self.val_dataset,
+            data_collator=data_collator,
+            compute_metrics=self.compute_metrics,
+        )
+
+        # Start training
+        logger.info("Starting training...")
+        trainer.train()
+
+        # Save the final model
+        logger.info("Saving final model...")
+        trainer.save_model()
+        self.tokenizer.save_pretrained(self.config.output_dir)
+
+        # Final evaluation
+        logger.info("Running final evaluation...")
+        eval_results = trainer.evaluate()
+        logger.info(f"Final evaluation results: {eval_results}")
+
+        # Test evaluation
+        test_results = trainer.evaluate(eval_dataset=self.test_dataset)
+        logger.info(f"Test results: {test_results}")
+
+        # Save training config
+        with open(os.path.join(self.config.output_dir, "training_config.json"), "w") as f:
+            json.dump(self.config.__dict__, f, indent=2)
+
+        if self.config.use_wandb:
+            wandb.log({"final_eval": eval_results, "test_results": test_results})
+            wandb.finish()
+
+        logger.info("Training completed successfully!")
+
+    def inference(self, text: str, max_new_tokens: int = 100) -> str:
+        """Run inference on a single text."""
+        if self.model is None or self.tokenizer is None:
+            raise ValueError("Model and tokenizer must be loaded first")
+
+        instruction = "Correct the spelling mistakes in the following Kyrgyz text:"
+        prompt = f"<start_of_turn>user\n{instruction}\n{text}<end_of_turn>\n<start_of_turn>model\n"
+
+        inputs = self.tokenizer(prompt, return_tensors="pt").to(self.model.device)
+
+        with torch.no_grad():
+            outputs = self.model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=True,
+                temperature=0.7,
+                top_p=0.9,
+                pad_token_id=self.tokenizer.eos_token_id
+            )
+
+        response = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        # Extract the corrected text
+        try:
+            corrected = response.split("<start_of_turn>model\n")[-1].split("<end_of_turn>")[0].strip()
+            return corrected
+        except:
+            return response
+
+
+def main():
+    """Main function to run training."""
+    # Configuration
+    config = TrainingConfig(
+        model_name="google/gemma-3-1b-it",
+        dataset_path="../misspelled_kg_dataset/",
+        output_dir="./kyrgyz_gemma_spellcheck",
+        num_train_epochs=3,
+        per_device_train_batch_size=2,
+        gradient_accumulation_steps=8,
+        learning_rate=5e-5,
+        max_length=512,
+        use_wandb=False,  # Disable wandb for now
+        num_samples=64,  # Use all data
+        load_in_8bit=False,  # Disable 8-bit quantization
+    )
+
+    # Initialize trainer
+    trainer = KyrgyzSpellCheckTrainer(config)
+
+    # Run training
+    trainer.train()
+
+    # Example inference
+    print("\n" + "="*50)
+    print("TESTING INFERENCE")
+    print("="*50)
+
+    test_texts = [
+        "Кыргызстан менин мекеним",
+        "Биз достубуз болобуз",
+        "Эртен мектепке барамын"
+    ]
+
+    for text in test_texts:
+        corrected = trainer.inference(text)
+        print(f"Original: {text}")
+        print(f"Corrected: {corrected}")
+        print("-" * 30)
+
+
+if __name__ == "__main__":
+    main()
