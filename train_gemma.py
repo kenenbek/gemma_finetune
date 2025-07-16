@@ -221,6 +221,13 @@ class KyrgyzSpellCheckTrainer:
             fp16=True,
             report_to="wandb" if self.config.use_wandb else None,
             run_name=f"kyrgyz-spellcheck-{self.config.model_name.split('/')[-1]}",
+            # Add eval_accumulation_steps to reduce memory usage during evaluation
+            eval_accumulation_steps=self.config.eval_accumulation_steps,
+            # Add predict_with_generate if specified
+            predict_with_generate=self.config.predict_with_generate,
+            # Add generation config to limit memory usage
+            generation_max_length=self.config.max_length,
+            generation_num_beams=1,
         )
 
     def compute_metrics(self, eval_pred):
