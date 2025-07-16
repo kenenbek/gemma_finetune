@@ -439,7 +439,7 @@ def main():
             num_train_epochs=1,
             per_device_train_batch_size=1,
             per_device_eval_batch_size=1,
-            gradient_accumulation_steps=1,
+            gradient_accumulation_steps=4,
             learning_rate=5e-5,
             weight_decay=0.01,
             warmup_steps=100,
