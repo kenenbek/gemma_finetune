@@ -36,7 +36,7 @@ class TrainingConfig:
     output_dir: str = "./kyrgyz_spellcheck_model"
     num_train_epochs: int = 10
     per_device_train_batch_size: int = 8
-    per_device_eval_batch_size: int = 8
+    per_device_eval_batch_size: int = 4
     gradient_accumulation_steps: int = 4
     learning_rate: float = 5e-5
     weight_decay: float = 0.01
@@ -372,8 +372,8 @@ def main():
         dataset_path="../misspelled_kg_dataset/",
         output_dir="./kyrgyz_gemma_spellcheck",
         num_train_epochs=100,
-        per_device_train_batch_size=16,
-        gradient_accumulation_steps=16,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=4,
         learning_rate=5e-5,
         max_length=512,
         use_wandb=True,
