@@ -436,7 +436,7 @@ def main():
         ),
         training=TrainingConfig(
             output_dir="./kyrgyz_spellcheck_model",
-            num_train_epochs=10,
+            num_train_epochs=1,
             per_device_train_batch_size=1,
             per_device_eval_batch_size=1,
             gradient_accumulation_steps=1,
