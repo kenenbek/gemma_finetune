@@ -31,9 +31,9 @@ class SimpleTrainingConfig:
     model_name: str = "google/gemma-3-1b-it"
     dataset_path: str = "../misspelled_kg_dataset/"
     output_dir: str = "./kyrgyz_gemma_spellcheck_simple"
-    num_train_epochs: int = 1
-    per_device_train_batch_size: int = 1
-    per_device_eval_batch_size: int = 1
+    num_train_epochs: int = 32
+    per_device_train_batch_size: int = 8
+    per_device_eval_batch_size: int = 8
     gradient_accumulation_steps: int = 16
     learning_rate: float = 5e-5
     weight_decay: float = 0.01
@@ -42,7 +42,7 @@ class SimpleTrainingConfig:
     save_steps: int = 100
     eval_steps: int = 100
     logging_steps: int = 10
-    num_samples: int = 64  # Use small subset for testing
+    num_samples: int = 256  # Use small subset for testing
 
     # LoRA parameters
     lora_r: int = 8

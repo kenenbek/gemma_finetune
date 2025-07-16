@@ -33,20 +33,20 @@ class TrainingConfig:
     model_name: str = "google/gemma-3-1b-it"
     dataset_path: str = "../misspelled_kg_dataset/"
     output_dir: str = "./kyrgyz_spellcheck_model"
-    num_train_epochs: int = 3
-    per_device_train_batch_size: int = 4
-    per_device_eval_batch_size: int = 4
+    num_train_epochs: int = 10
+    per_device_train_batch_size: int = 8
+    per_device_eval_batch_size: int = 8
     gradient_accumulation_steps: int = 4
-    learning_rate: float = 2e-4
+    learning_rate: float = 5e-5
     weight_decay: float = 0.01
     warmup_steps: int = 100
     max_length: int = 512
     save_steps: int = 500
-    eval_steps: int = 500
+    eval_steps: int = 50
     logging_steps: int = 100
     load_in_8bit: bool = True
-    use_wandb: bool = False
-    num_samples: Optional[int] = None  # None for all data
+    use_wandb: bool = True
+    num_samples: Optional[int] = 1024  # None for all data
 
     # LoRA parameters
     lora_r: int = 16
@@ -122,7 +122,9 @@ class KyrgyzSpellCheckTrainer:
         logger.info(f"Loading model: {self.config.model_name}")
 
         # Load model with quantization if specified
-        model_kwargs = {}
+        model_kwargs = {
+            "attn_implementation": "eager"
+        }
         if self.config.load_in_8bit:
             model_kwargs["load_in_8bit"] = True
             model_kwargs["device_map"] = "auto"
@@ -195,7 +197,7 @@ class KyrgyzSpellCheckTrainer:
             logging_steps=self.config.logging_steps,
             save_steps=self.config.save_steps,
             eval_steps=self.config.eval_steps,
-            evaluation_strategy="steps",
+            eval_strategy="steps",
             save_strategy="steps",
             load_best_model_at_end=True,
             metric_for_best_model="eval_loss",
@@ -243,9 +245,19 @@ class KyrgyzSpellCheckTrainer:
             else:
                 char_accuracy.append(1.0 if len(pred) == 0 else 0.0)
 
+        # Calculate word error rate (WER)
+        wer_scores = []
+        for pred, ref in zip(corrected_texts, reference_texts):
+            if len(ref.strip()) > 0:
+                wer = jiwer.wer(ref, pred)
+                wer_scores.append(wer)
+            else:
+                wer_scores.append(0.0 if len(pred.strip()) == 0 else 1.0)
+
         return {
             "exact_match": exact_match,
-            "character_accuracy": np.mean(char_accuracy)
+            "character_accuracy": np.mean(char_accuracy),
+            "word_error_rate": np.mean(wer_scores)
         }
 
     def train(self):
@@ -312,7 +324,7 @@ class KyrgyzSpellCheckTrainer:
 
         logger.info("Training completed successfully!")
 
-    def inference(self, text: str, max_new_tokens: int = 100) -> str:
+    def inference(self, text: str, max_new_tokens: int = 200) -> str:
         """Run inference on a single text."""
         if self.model is None or self.tokenizer is None:
             raise ValueError("Model and tokenizer must be loaded first")
@@ -349,14 +361,14 @@ def main():
         model_name="google/gemma-3-1b-it",
         dataset_path="../misspelled_kg_dataset/",
         output_dir="./kyrgyz_gemma_spellcheck",
-        num_train_epochs=3,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=8,
+        num_train_epochs=100,
+        per_device_train_batch_size=16,
+        gradient_accumulation_steps=16,
         learning_rate=5e-5,
         max_length=512,
-        use_wandb=False,  # Disable wandb for now
-        num_samples=64,  # Use all data
-        load_in_8bit=False,  # Disable 8-bit quantization
+        use_wandb=True,
+        num_samples=1024,
+        load_in_8bit=True,  # Disable 8-bit quantization
     )
 
     # Initialize trainer
