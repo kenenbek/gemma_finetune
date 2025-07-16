@@ -274,6 +274,20 @@ class KyrgyzSpellCheckTrainer:
         print("kotok")
         print("kotok")
         print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
+        print("kotok")
         """Compute evaluation metrics."""
         predictions, labels = eval_pred
 
