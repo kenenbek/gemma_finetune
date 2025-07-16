@@ -383,9 +383,10 @@ def main():
         use_wandb=True,
         num_samples=1024,
         load_in_8bit=True,
-        save_steps=500,
-        eval_steps=50,
-        logging_steps=100,
+
+        save_steps=100,
+        eval_steps=10,
+        logging_steps=10,
 
         eval_accumulation_steps=10,
         predict_with_generate=True,
