@@ -265,12 +265,13 @@ class KyrgyzSpellCheckTrainer:
             dataloader_pin_memory=False,
             fp16=self.config.training.fp16,
             eval_accumulation_steps=self.config.training.eval_accumulation_steps,
-            prediction_loss_only=True,
+            prediction_loss_only=False,
             report_to="wandb" if self.config.training.use_wandb else None,
             run_name=self.config.training.run_name
         )
 
     def compute_metrics(self, eval_pred):
+        print("kotok")
         """Compute evaluation metrics."""
         predictions, labels = eval_pred
 
