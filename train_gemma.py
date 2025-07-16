@@ -388,7 +388,7 @@ def main():
         eval_steps=2,
         logging_steps=2,
 
-        eval_accumulation_steps=4,
+        eval_accumulation_steps=1,
         predict_with_generate=True,
     )
 
