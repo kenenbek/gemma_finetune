@@ -10,7 +10,8 @@ from transformers import (
     AutoModelForCausalLM,
     TrainingArguments,
     Trainer,
-    DataCollatorForLanguageModeling
+    DataCollatorForLanguageModeling,
+    BitsAndBytesConfig
 )
 from peft import LoraConfig, get_peft_model, TaskType
 import os
@@ -126,8 +127,17 @@ class KyrgyzSpellCheckTrainer:
             "attn_implementation": "eager"
         }
         if self.config.load_in_8bit:
-            model_kwargs["load_in_8bit"] = True
-            model_kwargs["device_map"] = "auto"
+            quantization_config = BitsAndBytesConfig(
+                load_in_8bit=True,
+                llm_int8_threshold=6.0,
+                llm_int8_has_fp16_weight=False,
+            )
+            model_kwargs["quantization_config"] = quantization_config
+            # Fix device mapping for training with 8-bit quantization
+            if torch.cuda.is_available():
+                model_kwargs["device_map"] = {"": torch.cuda.current_device()}
+            else:
+                model_kwargs["device_map"] = {"": "cpu"}
             model_kwargs["torch_dtype"] = torch.float16
 
         self.model = AutoModelForCausalLM.from_pretrained(
