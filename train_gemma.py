@@ -134,7 +134,7 @@ class GenerationEvaluationCallback(TrainerCallback):
         model.eval()
 
         # Sample a few examples to avoid OOM
-        sample_size = min(10, len(self.eval_dataset))
+        sample_size = min(512, len(self.eval_dataset))
         indices = random.sample(range(len(self.eval_dataset)), sample_size)
 
         corrected_texts = []
@@ -148,22 +148,47 @@ class GenerationEvaluationCallback(TrainerCallback):
                 sample['input_ids'], skip_special_tokens=True
             )
 
-            misspelled_text = \
-            input_text.split("Correct the spelling mistakes in the following Kyrgyz text:\n")[1].split("<end_of_turn>")[
-                0].strip()
+            try:
+                # Extract misspelled text
+                instruction_split = input_text.split("Correct the spelling mistakes in the following Kyrgyz text:\n")
+                if len(instruction_split) > 1:
+                    misspelled_text = instruction_split[1].split("<end_of_turn>")[0].strip()
+                else:
+                    print(f"Warning: Could not extract misspelled text from: {input_text[:100]}...")
+                    continue
 
-            # Generate correction
-            corrected = self.trainer_instance.inference(misspelled_text, max_new_tokens=100)
-            corrected_texts.append(corrected)
+                # Generate correction
+                corrected = self.trainer_instance.inference(misspelled_text, max_new_tokens=256)
+                corrected_texts.append(corrected)
 
-            # Extract reference
-            reference = input_text.split("<start_of_turn>model\n")[1].split("<end_of_turn>")[0].strip()
-            reference_texts.append(reference)
+                # Extract reference
+                model_split = input_text.split("<start_of_turn>model\n")
+                if len(model_split) > 1:
+                    reference = model_split[1].split("<end_of_turn>")[0].strip()
+                    reference_texts.append(reference)
+                else:
+                    print(f"Warning: Could not extract reference text from: {input_text[:100]}...")
+                    # Remove the last added corrected text since we don't have a reference
+                    corrected_texts.pop()
+                    continue
+
+            except Exception as e:
+                print(f"Error processing sample {idx}: {e}")
+                print(f"Input text: {input_text[:200]}...")
+                continue
+
+        # Only calculate metrics if we have valid pairs
+        if len(corrected_texts) == 0 or len(reference_texts) == 0:
+            print(f"Step {step} - No valid text pairs found for evaluation")
+            model.train()
+            return
 
         # Calculate metrics
         exact_match = sum(1 for p, r in zip(corrected_texts, reference_texts) if p == r) / len(corrected_texts)
 
         char_accuracy = []
+        wer_scores = []
+
         for pred, ref in zip(corrected_texts, reference_texts):
             if len(ref) > 0:
                 char_acc = 1 - jiwer.cer(ref, pred)
@@ -171,9 +196,22 @@ class GenerationEvaluationCallback(TrainerCallback):
             else:
                 char_accuracy.append(1.0 if len(pred) == 0 else 0.0)
 
-        print(f"Step {step} - Generation Metrics:")
-        print(f"  Exact Match: {exact_match:.4f}")
-        print(f"  Character Accuracy: {np.mean(char_accuracy):.4f}")
+            # Calculate WER
+            if len(ref.strip()) > 0:
+                wer = jiwer.wer(ref, pred)
+                wer_scores.append(wer)
+            else:
+                wer_scores.append(0.0 if len(pred.strip()) == 0 else 1.0)
+
+        # Log to wandb if enabled
+        if hasattr(self.trainer_instance.config.training, 'use_wandb') and self.trainer_instance.config.training.use_wandb:
+            wandb.log({
+                "generation_eval/step": step,
+                "generation_eval/exact_match": exact_match,
+                "generation_eval/character_accuracy": float(np.mean(char_accuracy)),
+                "generation_eval/word_error_rate": float(np.mean(wer_scores)),
+                "generation_eval/num_samples": len(corrected_texts)
+            }, step=step)
 
         model.train()
 
