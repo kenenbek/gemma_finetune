@@ -507,7 +507,7 @@ def main():
         ),
         data=DataConfig(
             dataset_path="../misspelled_kg_dataset/",
-            num_samples=16,
+            num_samples=64,
             max_length=512
         ),
         training=TrainingConfig(
