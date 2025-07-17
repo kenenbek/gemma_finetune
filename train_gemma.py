@@ -13,6 +13,9 @@ from transformers import (
     DataCollatorForLanguageModeling,
     BitsAndBytesConfig
 )
+
+from transformers import TrainerCallback
+import random
 from peft import LoraConfig, get_peft_model, TaskType
 import os
 import json
@@ -111,6 +114,69 @@ class ExperimentConfig:
             "training": self.training.__dict__
         }
 
+
+class GenerationEvaluationCallback(TrainerCallback):
+    def __init__(self, trainer_instance, eval_dataset, eval_steps=50):
+        self.trainer_instance = trainer_instance
+        self.eval_dataset = eval_dataset
+        self.eval_steps = eval_steps
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        if state.global_step % self.eval_steps == 0:
+            self.run_generation_eval(kwargs['model'], state.global_step)
+
+    def run_generation_eval(self, model, step):
+        print("eval")
+        print("eval")
+        print("eval")
+        print("eval")
+        print("eval")
+        print("eval")
+        model.eval()
+
+        # Sample a few examples to avoid OOM
+        sample_size = min(10, len(self.eval_dataset))
+        indices = random.sample(range(len(self.eval_dataset)), sample_size)
+
+        corrected_texts = []
+        reference_texts = []
+
+        for idx in indices:
+            sample = self.eval_dataset[idx]
+
+            # Extract misspelled text from input
+            input_text = self.trainer_instance.tokenizer.decode(
+                sample['input_ids'], skip_special_tokens=True
+            )
+
+            misspelled_text = \
+            input_text.split("Correct the spelling mistakes in the following Kyrgyz text:\n")[1].split("<end_of_turn>")[
+                0].strip()
+
+            # Generate correction
+            corrected = self.trainer_instance.inference(misspelled_text, max_new_tokens=100)
+            corrected_texts.append(corrected)
+
+            # Extract reference
+            reference = input_text.split("<start_of_turn>model\n")[1].split("<end_of_turn>")[0].strip()
+            reference_texts.append(reference)
+
+        # Calculate metrics
+        exact_match = sum(1 for p, r in zip(corrected_texts, reference_texts) if p == r) / len(corrected_texts)
+
+        char_accuracy = []
+        for pred, ref in zip(corrected_texts, reference_texts):
+            if len(ref) > 0:
+                char_acc = 1 - jiwer.cer(ref, pred)
+                char_accuracy.append(max(0.0, char_acc))
+            else:
+                char_accuracy.append(1.0 if len(pred) == 0 else 0.0)
+
+        print(f"Step {step} - Generation Metrics:")
+        print(f"  Exact Match: {exact_match:.4f}")
+        print(f"  Character Accuracy: {np.mean(char_accuracy):.4f}")
+
+        model.train()
 
 class KyrgyzSpellCheckDataset(Dataset):
     """Dataset class for Kyrgyz spell checking formatted for instruction tuning."""
@@ -354,6 +420,8 @@ class KyrgyzSpellCheckTrainer:
             mlm=False,
         )
 
+        generation_callback = GenerationEvaluationCallback(self, self.val_dataset)
+
         # Initialize trainer
         trainer = Trainer(
             model=self.model,
@@ -361,7 +429,7 @@ class KyrgyzSpellCheckTrainer:
             train_dataset=self.train_dataset,
             eval_dataset=self.val_dataset,
             data_collator=data_collator,
-            compute_metrics=self.compute_metrics,
+            callbacks=[generation_callback]
         )
 
         # Start training
@@ -447,7 +515,7 @@ def main():
             num_train_epochs=1,
             per_device_train_batch_size=1,
             per_device_eval_batch_size=1,
-            gradient_accumulation_steps=4,
+            gradient_accumulation_steps=1,
             learning_rate=5e-5,
             weight_decay=0.01,
             warmup_steps=100,
