@@ -122,8 +122,7 @@ class GenerationEvaluationCallback(TrainerCallback):
         self.eval_steps = eval_steps
 
     def on_evaluate(self, args, state, control, **kwargs):
-        if state.global_step % self.eval_steps == 0:
-            self.run_generation_eval(kwargs['model'], state.global_step)
+        self.run_generation_eval(kwargs['model'], state.global_step)
 
     def run_generation_eval(self, model, step):
         print("eval")
