@@ -1,18 +1,15 @@
 """
 Finetuning procedure for Gemma-3-1B-IT for Kyrgyz spell checking.
-Uses LoRA (Low-Rank Adaptation) for efficient finetuning.
+Uses LoRA (Low-Rank Adaptation) for efficient finetuning with SFTTrainer.
 """
 
 import torch
-from torch.utils.data import Dataset
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
-    TrainingArguments,
-    Trainer,
-    DataCollatorForLanguageModeling,
     BitsAndBytesConfig
 )
+from trl import SFTTrainer, SFTConfig
 
 from transformers import TrainerCallback
 import random
@@ -26,6 +23,7 @@ import wandb
 import jiwer
 import numpy as np
 from data import KyrgyzDataLoader
+from datasets import Dataset as HFDataset
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
@@ -64,6 +62,7 @@ class DataConfig:
     dataset_path: str = "../misspelled_kg_dataset/"
     num_samples: Optional[int] = 512
     max_length: int = 512
+    max_val_samples: Optional[int] = 1  # Manual limit for validation dataset size
 
 
 @dataclass
@@ -112,142 +111,6 @@ class ExperimentConfig:
             "lora": self.lora.__dict__,
             "data": self.data.__dict__,
             "training": self.training.__dict__
-        }
-
-
-class GenerationEvaluationCallback(TrainerCallback):
-    def __init__(self, trainer_instance, eval_dataset, eval_steps=50):
-        self.trainer_instance = trainer_instance
-        self.eval_dataset = eval_dataset
-        self.eval_steps = eval_steps
-
-    def on_evaluate(self, args, state, control, **kwargs):
-        self.run_generation_eval(kwargs['model'], state.global_step)
-
-    def run_generation_eval(self, model, step):
-        print("eval")
-        print("eval")
-        print("eval")
-        print("eval")
-        print("eval")
-        print("eval")
-        model.eval()
-
-        # Sample a few examples to avoid OOM
-        sample_size = min(512, len(self.eval_dataset))
-        indices = random.sample(range(len(self.eval_dataset)), sample_size)
-
-        corrected_texts = []
-        reference_texts = []
-
-        for idx in indices:
-            sample = self.eval_dataset[idx]
-
-            # Extract misspelled text from input
-            input_text = self.trainer_instance.tokenizer.decode(
-                sample['input_ids'], skip_special_tokens=True
-            )
-
-            try:
-                # Extract misspelled text
-                instruction_split = input_text.split("Correct the spelling mistakes in the following Kyrgyz text:\n")
-                if len(instruction_split) > 1:
-                    misspelled_text = instruction_split[1].split("<end_of_turn>")[0].strip()
-                else:
-                    print(f"Warning: Could not extract misspelled text from: {input_text[:100]}...")
-                    continue
-
-                # Generate correction
-                corrected = self.trainer_instance.inference(misspelled_text, max_new_tokens=256)
-                corrected_texts.append(corrected)
-
-                # Extract reference
-                model_split = input_text.split("<start_of_turn>model\n")
-                if len(model_split) > 1:
-                    reference = model_split[1].split("<end_of_turn>")[0].strip()
-                    reference_texts.append(reference)
-                else:
-                    print(f"Warning: Could not extract reference text from: {input_text[:100]}...")
-                    # Remove the last added corrected text since we don't have a reference
-                    corrected_texts.pop()
-                    continue
-
-            except Exception as e:
-                print(f"Error processing sample {idx}: {e}")
-                print(f"Input text: {input_text[:200]}...")
-                continue
-
-        # Only calculate metrics if we have valid pairs
-        if len(corrected_texts) == 0 or len(reference_texts) == 0:
-            print(f"Step {step} - No valid text pairs found for evaluation")
-            model.train()
-            return
-
-        # Calculate metrics
-        exact_match = sum(1 for p, r in zip(corrected_texts, reference_texts) if p == r) / len(corrected_texts)
-
-        char_accuracy = []
-        wer_scores = []
-
-        for pred, ref in zip(corrected_texts, reference_texts):
-            if len(ref) > 0:
-                char_acc = 1 - jiwer.cer(ref, pred)
-                char_accuracy.append(max(0.0, char_acc))
-            else:
-                char_accuracy.append(1.0 if len(pred) == 0 else 0.0)
-
-            # Calculate WER
-            if len(ref.strip()) > 0:
-                wer = jiwer.wer(ref, pred)
-                wer_scores.append(wer)
-            else:
-                wer_scores.append(0.0 if len(pred.strip()) == 0 else 1.0)
-
-        # Log to wandb if enabled
-        if hasattr(self.trainer_instance.config.training, 'use_wandb') and self.trainer_instance.config.training.use_wandb:
-            wandb.log({
-                "generation_eval/step": step,
-                "generation_eval/exact_match": exact_match,
-                "generation_eval/character_accuracy": float(np.mean(char_accuracy)),
-                "generation_eval/word_error_rate": float(np.mean(wer_scores)),
-                "generation_eval/num_samples": len(corrected_texts)
-            }, step=step)
-
-        model.train()
-
-class KyrgyzSpellCheckDataset(Dataset):
-    """Dataset class for Kyrgyz spell checking formatted for instruction tuning."""
-
-    def __init__(self, misspelled_texts: List[str], correct_texts: List[str], tokenizer, max_length: int = 512):
-        self.misspelled = misspelled_texts
-        self.correct = correct_texts
-        self.tokenizer = tokenizer
-        self.max_length = max_length
-
-    def __len__(self):
-        return len(self.misspelled)
-
-    def __getitem__(self, idx):
-        misspelled = self.misspelled[idx]
-        correct = self.correct[idx]
-
-        # Format as instruction-following task
-        instruction = "Correct the spelling mistakes in the following Kyrgyz text:"
-        prompt = f"<start_of_turn>user\n{instruction}\n{misspelled}<end_of_turn>\n<start_of_turn>model\n{correct}<end_of_turn>"
-
-        # Tokenize
-        encoded = self.tokenizer(
-            prompt,
-            truncation=True,
-            padding="max_length",
-            max_length=self.max_length,
-            return_tensors="pt"
-        )
-
-        return {
-            "input_ids": encoded["input_ids"].flatten(),
-            "attention_mask": encoded["attention_mask"].flatten(),
-            "labels": encoded["input_ids"].flatten()
         }
 
 
@@ -323,30 +186,62 @@ class KyrgyzSpellCheckTrainer:
             num_samples=self.config.data.num_samples
         )
 
-        # Create datasets
-        self.train_dataset = KyrgyzSpellCheckDataset(
-            splits['train'][0], splits['train'][1],
-            self.tokenizer, self.config.data.max_length
-        )
+        # Prepare formatted texts for SFT using apply_chat_template
+        def format_data(misspelled_texts, correct_texts):
+            formatted_texts = []
+            for misspelled, correct in zip(misspelled_texts, correct_texts):
+                instruction = "Correct the spelling mistakes in the following Kyrgyz text:"
 
-        self.val_dataset = KyrgyzSpellCheckDataset(
-            splits['val'][0], splits['val'][1],
-            self.tokenizer, self.config.data.max_length
-        )
+                # Create conversation structure for chat template
+                messages = [
+                    {
+                        "role": "user",
+                        "content": f"{instruction}\n{misspelled}"
+                    },
+                    {
+                        "role": "assistant",
+                        "content": correct
+                    }
+                ]
 
-        self.test_dataset = KyrgyzSpellCheckDataset(
-            splits['test'][0], splits['test'][1],
-            self.tokenizer, self.config.data.max_length
-        )
+                # Use apply_chat_template but remove the automatic BOS token
+                # since SFTTrainer will add it during tokenization
+                formatted_text = self.tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=False
+                )
+
+                # Remove the BOS token that apply_chat_template adds
+                # since SFTTrainer will add its own BOS token
+                if formatted_text.startswith(self.tokenizer.bos_token):
+                    formatted_text = formatted_text[len(self.tokenizer.bos_token):]
+
+                formatted_texts.append(formatted_text)
+
+            return formatted_texts
+
+        # Create Hugging Face datasets
+        train_texts = format_data(splits['train'][0], splits['train'][1])
+        val_texts = format_data(splits['val'][0], splits['val'][1])
+        test_texts = format_data(splits['test'][0], splits['test'][1])
+
+        # Limit validation dataset size if specified
+        if self.config.data.max_val_samples is not None and len(val_texts) > self.config.data.max_val_samples:
+            val_texts = val_texts[:self.config.data.max_val_samples]
+
+        self.train_dataset = HFDataset.from_dict({"text": train_texts})
+        self.val_dataset = HFDataset.from_dict({"text": val_texts})
+        self.test_dataset = HFDataset.from_dict({"text": test_texts})
 
         logger.info(f"Datasets loaded:")
         logger.info(f"  Train: {len(self.train_dataset)} samples")
         logger.info(f"  Validation: {len(self.val_dataset)} samples")
         logger.info(f"  Test: {len(self.test_dataset)} samples")
 
-    def setup_training_arguments(self):
-        """Setup training arguments."""
-        return TrainingArguments(
+    def setup_sft_config(self):
+        """Setup SFT configuration."""
+        return SFTConfig(
             output_dir=self.config.training.output_dir,
             num_train_epochs=self.config.training.num_train_epochs,
             per_device_train_batch_size=self.config.training.per_device_train_batch_size,
@@ -368,67 +263,67 @@ class KyrgyzSpellCheckTrainer:
             dataloader_pin_memory=False,
             fp16=self.config.training.fp16,
             eval_accumulation_steps=self.config.training.eval_accumulation_steps,
-            prediction_loss_only=True,
             report_to="wandb" if self.config.training.use_wandb else None,
-            run_name=self.config.training.run_name
+            run_name=self.config.training.run_name,
+            # SFT specific parameters
+            max_seq_length=self.config.data.max_length,
+            completion_only_loss=True,
+            packing=False,
         )
 
     def compute_metrics(self, eval_pred):
         """Compute evaluation metrics."""
-        print("sdfsdfsdf")
-        print("sdfsdfsdf")
-        print("sdfsdfsdf")
-        print("sdfsdfsdf")
-        print("sdfsdfsdf")
-        print("sdfsdfsdf")
-        print("sdfsdfsdf")
-        print("sdfsdfsdf")
         predictions, labels = eval_pred
 
-        # Decode predictions and labels
-        decoded_preds = self.tokenizer.batch_decode(predictions, skip_special_tokens=True)
-        decoded_labels = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
+        # Handle predictions - they might be logits, so convert to token IDs
+        if predictions.ndim > 2 or predictions.dtype != np.int64:
+            # If predictions are logits, get the argmax
+            if isinstance(predictions, tuple):
+                predictions = predictions[0]
+            predictions = np.argmax(predictions, axis=-1)
 
-        # Extract corrected text from model outputs
-        corrected_texts = []
-        reference_texts = []
+        # Ensure predictions and labels are valid token IDs
+        vocab_size = len(self.tokenizer)
 
-        for pred, label in zip(decoded_preds, decoded_labels):
-            # Extract the corrected text after the model response
+        # Clip token IDs to valid range and convert to int
+        predictions = np.clip(predictions, 0, vocab_size - 1).astype(np.int64)
+        labels = np.clip(labels, 0, vocab_size - 1).astype(np.int64)
+
+        # Replace any remaining invalid tokens with pad token
+        pad_token_id = self.tokenizer.pad_token_id if self.tokenizer.pad_token_id is not None else 0
+        predictions = np.where(predictions < 0, pad_token_id, predictions)
+        labels = np.where(labels < 0, pad_token_id, labels)
+
+        try:
+            # Decode predictions and labels
+            decoded_preds = self.tokenizer.batch_decode(predictions, skip_special_tokens=True)
+            decoded_labels = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
+        except Exception as e:
+            logger.warning(f"Error decoding predictions/labels: {e}")
+            # Return basic metrics if decoding fails
+            return {
+                "CER": 1.0,
+                "WER": 1.0
+            }
+
+        # Extract corrected text from model outputs using vectorized operations
+        def extract_model_response(text):
+            """Extract text between <start_of_turn>model and <end_of_turn> tags."""
             try:
-                pred_text = pred.split("<start_of_turn>model\n")[-1].split("<end_of_turn>")[0].strip()
-                label_text = label.split("<start_of_turn>model\n")[-1].split("<end_of_turn>")[0].strip()
-                corrected_texts.append(pred_text)
-                reference_texts.append(label_text)
+                return text.split("<start_of_turn>model\n")[-1].split("<end_of_turn>")[0].strip()
             except:
-                corrected_texts.append(pred)
-                reference_texts.append(label)
+                return text
 
-        # Calculate metrics
-        exact_match = sum(1 for p, r in zip(corrected_texts, reference_texts) if p == r) / len(corrected_texts)
+        # Vectorized extraction using list comprehensions
+        corrected_texts = [extract_model_response(pred) for pred in decoded_preds]
+        reference_texts = [extract_model_response(label) for label in decoded_labels]
 
-        # Calculate character-level accuracy
-        char_accuracy = []
-        for pred, ref in zip(corrected_texts, reference_texts):
-            if len(ref) > 0:
-                char_acc = 1 - jiwer.cer(ref, pred)
-                char_accuracy.append(max(0.0, char_acc))
-            else:
-                char_accuracy.append(1.0 if len(pred) == 0 else 0.0)
-
-        # Calculate word error rate (WER)
-        wer_scores = []
-        for pred, ref in zip(corrected_texts, reference_texts):
-            if len(ref.strip()) > 0:
-                wer = jiwer.wer(ref, pred)
-                wer_scores.append(wer)
-            else:
-                wer_scores.append(0.0 if len(pred.strip()) == 0 else 1.0)
+        overall_cer = jiwer.cer(reference_texts, corrected_texts)
+        overall_wer = jiwer.wer(reference_texts, corrected_texts)
 
         return {
-            "exact_match": exact_match,
-            "character_accuracy": np.mean(char_accuracy),
-            "word_error_rate": np.mean(wer_scores)
+            "CER": overall_cer,
+            "WER": overall_wer
         }
 
     def train(self):
@@ -448,25 +343,22 @@ class KyrgyzSpellCheckTrainer:
                 name=f"gemma-kyrgyz-spellcheck-{self.config.training.num_train_epochs}epochs"
             )
 
-        # Setup training arguments
-        training_args = self.setup_training_arguments()
+        # Setup SFT configuration
+        sft_config = self.setup_sft_config()
 
-        # Data collator
-        data_collator = DataCollatorForLanguageModeling(
-            tokenizer=self.tokenizer,
-            mlm=False,
-        )
+        def preprocess_logits_for_metrics(logits, labels):
+            if isinstance(logits, tuple):
+                logits = logits[0]
+            return logits.argmax(dim=-1)
 
-        generation_callback = GenerationEvaluationCallback(self, self.val_dataset)
-
-        # Initialize trainer
-        trainer = Trainer(
+        # Initialize SFTTrainer
+        trainer = SFTTrainer(
             model=self.model,
-            args=training_args,
+            args=sft_config,
             train_dataset=self.train_dataset,
             eval_dataset=self.val_dataset,
-            data_collator=data_collator,
-            callbacks=[generation_callback]
+            compute_metrics=self.compute_metrics,
+            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
 
         # Start training
@@ -544,7 +436,7 @@ def main():
         ),
         data=DataConfig(
             dataset_path="../misspelled_kg_dataset/",
-            num_samples=64,
+            num_samples=32,
             max_length=512
         ),
         training=TrainingConfig(
