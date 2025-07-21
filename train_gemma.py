@@ -60,7 +60,7 @@ class DataConfig:
     dataset_path: str = "../misspelled_kg_dataset/"
     num_samples: Optional[int] = 512
     max_length: int = 512
-    max_val_samples: Optional[int] = 1  # Manual limit for validation dataset size
+    max_val_samples: Optional[int] = None  # Manual limit for validation dataset size
 
 
 @dataclass
@@ -260,6 +260,7 @@ class KyrgyzSpellCheckTrainer:
             remove_unused_columns=False,
             dataloader_pin_memory=False,
             fp16=self.config.training.fp16,
+            dataloader_drop_last=False,  # Add this to handle batch size consistency
             eval_accumulation_steps=self.config.training.eval_accumulation_steps,
             report_to="wandb" if self.config.training.use_wandb else None,
             run_name=self.config.training.run_name,
@@ -426,24 +427,24 @@ def main():
         ),
         data=DataConfig(
             dataset_path="../misspelled_kg_dataset/",
-            num_samples=1000,  # Increased samples for better training
+            num_samples=32,  # Increased samples for better training
             max_length=256
         ),
         training=TrainingConfig(
             output_dir="./kyrgyz_spellcheck_model",
             num_train_epochs=3,  # Increased epochs for better convergence
             per_device_train_batch_size=4,  # Increased batch size
-            per_device_eval_batch_size=8,  # Larger eval batch size
-            gradient_accumulation_steps=4,  # Accumulate gradients for effective batch size of 16
+            per_device_eval_batch_size=4,  # Larger eval batch size
+            gradient_accumulation_steps=1,  # Accumulate gradients for effective batch size of 16
             learning_rate=2e-5,  # Higher learning rate for LoRA
             weight_decay=0.01,
             warmup_steps=50,  # Reduced warmup steps (5% of total steps)
             logging_steps=25,  # Log less frequently
             save_steps=200,  # Save less frequently
-            eval_steps=100,  # Evaluate less frequently
+            eval_steps=2,  # Evaluate less frequently
             save_total_limit=3,
             fp16=True,
-            eval_accumulation_steps=128,  # Set to 1 for automatic handling
+            eval_accumulation_steps=32,  # Reduced for stability
             use_wandb=True,  # Enable wandb for better tracking
             run_name="kyrgyz-spellcheck-gemma"
         )
