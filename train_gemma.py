@@ -436,8 +436,7 @@ def main():
             num_train_epochs=3,  # Increased epochs for better convergence
             per_device_train_batch_size=4,  # Increased batch size
             per_device_eval_batch_size=4,  # Larger eval batch size
-            gradient_accumulation_steps=0,  # Accumulate gradients for effective batch size of 16
-            learning_rate=2e-5,  # Higher learning rate for LoRA
+            learning_rate=2e-7,  # Higher learning rate for LoRA
             weight_decay=0.01,
             warmup_steps=50,  # Reduced warmup steps (5% of total steps)
             logging_steps=25,  # Log less frequently
