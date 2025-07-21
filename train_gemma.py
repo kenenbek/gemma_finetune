@@ -29,6 +29,7 @@ from datasets import Dataset as HFDataset
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
 @dataclass
 class ModelConfig:
@@ -306,20 +307,8 @@ class KyrgyzSpellCheckTrainer:
                 "WER": 1.0
             }
 
-        # Extract corrected text from model outputs using vectorized operations
-        def extract_model_response(text):
-            """Extract text between <start_of_turn>model and <end_of_turn> tags."""
-            try:
-                return text.split("<start_of_turn>model\n")[-1].split("<end_of_turn>")[0].strip()
-            except:
-                return text
-
-        # Vectorized extraction using list comprehensions
-        corrected_texts = [extract_model_response(pred) for pred in decoded_preds]
-        reference_texts = [extract_model_response(label) for label in decoded_labels]
-
-        overall_cer = jiwer.cer(reference_texts, corrected_texts)
-        overall_wer = jiwer.wer(reference_texts, corrected_texts)
+        overall_cer = jiwer.cer(decoded_labels, decoded_preds)
+        overall_wer = jiwer.wer(decoded_labels, decoded_preds)
 
         return {
             "CER": overall_cer,
@@ -404,7 +393,7 @@ class KyrgyzSpellCheckTrainer:
                 **inputs,
                 max_new_tokens=max_new_tokens,
                 do_sample=True,
-                temperature=0.7,
+                temperature=0.0,
                 top_p=0.9,
                 pad_token_id=self.tokenizer.eos_token_id
             )
