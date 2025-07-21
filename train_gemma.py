@@ -410,7 +410,7 @@ class KyrgyzSpellCheckTrainer:
 def main():
     # Set GPU visibility to use only first 2 GPUs
     import os
-    os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
     config = ExperimentConfig(
         model=ModelConfig(
