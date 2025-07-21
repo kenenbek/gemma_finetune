@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ModelConfig:
     """Configuration for model settings."""
-    model_name: str = "google/gemma-3-1b-it-fp16"
+    model_name: str = "google/gemma-3-1b-it"
     max_length: int = 256
     use_quantization: bool = False
     attn_implementation: str = "eager"
@@ -414,7 +414,7 @@ def main():
 
     config = ExperimentConfig(
         model=ModelConfig(
-            model_name="google/gemma-3-1b-it-fp16",
+            model_name="google/gemma-3-1b-it",
             max_length=256,
             use_quantization=False,
             attn_implementation="eager"
