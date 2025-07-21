@@ -31,8 +31,8 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ModelConfig:
     """Configuration for model settings."""
-    model_name: str = "google/gemma-3-1b-it"
-    max_length: int = 512
+    model_name: str = "google/gemma-3-1b-it-fp16"
+    max_length: int = 256
     use_quantization: bool = False
     attn_implementation: str = "eager"
 
@@ -59,7 +59,7 @@ class DataConfig:
     """Configuration for dataset settings."""
     dataset_path: str = "../misspelled_kg_dataset/"
     num_samples: Optional[int] = 512
-    max_length: int = 512
+    max_length: int = 256
     max_val_samples: Optional[int] = None  # Manual limit for validation dataset size
 
 
@@ -414,9 +414,9 @@ def main():
 
     config = ExperimentConfig(
         model=ModelConfig(
-            model_name="google/gemma-3-1b-it",
+            model_name="google/gemma-3-1b-it-fp16",
             max_length=256,
-            use_quantization=True,
+            use_quantization=False,
             attn_implementation="eager"
         ),
         lora=LoRAConfig(
