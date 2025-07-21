@@ -11,8 +11,6 @@ from transformers import (
 )
 from trl import SFTTrainer, SFTConfig
 
-from transformers import TrainerCallback
-import random
 from peft import LoraConfig, get_peft_model, TaskType
 import os
 import json
@@ -29,7 +27,6 @@ from datasets import Dataset as HFDataset
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
 
 @dataclass
 class ModelConfig:
@@ -409,41 +406,45 @@ class KyrgyzSpellCheckTrainer:
 
 
 def main():
+    # Set GPU visibility to use only first 2 GPUs
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = "2,3"
+
     config = ExperimentConfig(
         model=ModelConfig(
             model_name="google/gemma-3-1b-it",
-            max_length=512,
-            use_quantization=False,
+            max_length=256,
+            use_quantization=True,
             attn_implementation="eager"
         ),
         lora=LoRAConfig(
-            r=16,
-            lora_alpha=32,
+            r=32,  # Increased rank for better capacity
+            lora_alpha=64,  # Increased alpha (typically 2x rank)
             target_modules=["q_proj", "v_proj", "k_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
-            lora_dropout=0.1,
+            lora_dropout=0.05,  # Reduced dropout for better learning
             bias="none"
         ),
         data=DataConfig(
             dataset_path="../misspelled_kg_dataset/",
-            num_samples=32,
-            max_length=512
+            num_samples=1000,  # Increased samples for better training
+            max_length=256
         ),
         training=TrainingConfig(
             output_dir="./kyrgyz_spellcheck_model",
-            num_train_epochs=1,
-            per_device_train_batch_size=1,
-            per_device_eval_batch_size=1,
-            gradient_accumulation_steps=1,
-            learning_rate=5e-5,
+            num_train_epochs=3,  # Increased epochs for better convergence
+            per_device_train_batch_size=4,  # Increased batch size
+            per_device_eval_batch_size=8,  # Larger eval batch size
+            gradient_accumulation_steps=4,  # Accumulate gradients for effective batch size of 16
+            learning_rate=2e-5,  # Higher learning rate for LoRA
             weight_decay=0.01,
-            warmup_steps=100,
-            logging_steps=10,
-            save_steps=50,
-            eval_steps=2,
+            warmup_steps=50,  # Reduced warmup steps (5% of total steps)
+            logging_steps=25,  # Log less frequently
+            save_steps=200,  # Save less frequently
+            eval_steps=100,  # Evaluate less frequently
             save_total_limit=3,
             fp16=True,
-            eval_accumulation_steps=1024,
-            use_wandb=False,
+            eval_accumulation_steps=128,  # Set to 1 for automatic handling
+            use_wandb=True,  # Enable wandb for better tracking
             run_name="kyrgyz-spellcheck-gemma"
         )
     )
