@@ -273,6 +273,7 @@ class KyrgyzSpellCheckTrainer:
     def compute_metrics(self, eval_pred):
         """Compute evaluation metrics."""
         predictions, labels = eval_pred
+        print(predictions.shape, labels.shape, "predictions and labels shapes")
 
         # Handle predictions - they might be logits, so convert to token IDs
         if predictions.ndim > 2 or predictions.dtype != np.int64:
