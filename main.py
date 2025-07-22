@@ -84,7 +84,7 @@ def create_full_finetuning_config():
             warmup_steps=100,
             logging_steps=100,
             save_steps=200,
-            eval_steps=200,
+            eval_steps=100,
             save_total_limit=4,
             fp16=True,
             eval_accumulation_steps=32,
