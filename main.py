@@ -96,8 +96,6 @@ def create_full_finetuning_config():
 
 def main():
     """Main function to run the training pipeline."""
-    # Set GPU visibility to use only GPU 2
-    os.environ["CUDA_VISIBLE_DEVICES"] = "2"
     # Choose configuration type
     # Set use_full_finetuning = True to train without PEFT
     use_full_finetuning = True

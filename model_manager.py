@@ -41,7 +41,8 @@ class ModelManager:
 
         # Load model with quantization if specified
         model_kwargs = {
-            "attn_implementation": self.config.model.attn_implementation
+            "attn_implementation": self.config.model.attn_implementation,
+            "device_map": "auto"
         }
 
         if self.config.model.use_quantization:
@@ -57,6 +58,7 @@ class ModelManager:
             self.config.model.model_name,
             **model_kwargs
         )
+        print(model.hf_device_map)
 
         # Apply LoRA only if use_peft is True
         if self.config.model.use_peft:
