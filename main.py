@@ -38,8 +38,8 @@ def create_default_config():
         training=TrainingConfig(
             output_dir="./kyrgyz_spellcheck_model",
             num_train_epochs=100,
-            per_device_train_batch_size=32,
-            per_device_eval_batch_size=32,
+            per_device_train_batch_size=16,
+            per_device_eval_batch_size=16,
             learning_rate=2e-7,
             weight_decay=0.01,
             warmup_steps=50,
