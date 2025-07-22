@@ -20,7 +20,8 @@ def create_default_config():
             model_name="google/gemma-3-1b-it",
             max_length=256,
             use_quantization=False,
-            attn_implementation="eager"
+            attn_implementation="eager",
+            use_peft=True  # Set to False for full fine-tuning
         ),
         lora=LoRAConfig(
             r=32,  # Increased rank for better capacity
@@ -40,7 +41,7 @@ def create_default_config():
             num_train_epochs=100,
             per_device_train_batch_size=8,
             per_device_eval_batch_size=8,
-            learning_rate=2e-7,
+            learning_rate=2e-7,  # Lower LR for full fine-tuning, higher for LoRA
             weight_decay=0.01,
             warmup_steps=50,
             logging_steps=25,
@@ -55,6 +56,42 @@ def create_default_config():
     )
 
 
+def create_full_finetuning_config():
+    """Create configuration for full fine-tuning (without PEFT)."""
+    return ExperimentConfig(
+        model=ModelConfig(
+            model_name="google/gemma-3-1b-it",
+            max_length=256,
+            use_quantization=False,
+            attn_implementation="eager",
+            use_peft=False  # Disable PEFT for full fine-tuning
+        ),
+        lora=LoRAConfig(),  # Still needed for config structure but won't be used
+        data=DataConfig(
+            dataset_path="../misspelled_kg_dataset/",
+            num_samples=1024,  # Smaller dataset for full fine-tuning due to memory constraints
+            max_val_samples=128,
+            max_length=256
+        ),
+        training=TrainingConfig(
+            output_dir="./kyrgyz_spellcheck_model_full",
+            num_train_epochs=3,  # Fewer epochs for full fine-tuning
+            per_device_train_batch_size=1,  # Smaller batch size due to memory requirements
+            per_device_eval_batch_size=1,
+            gradient_accumulation_steps=8,  # Higher accumulation to simulate larger batches
+            learning_rate=5e-6,  # Much lower learning rate for full fine-tuning
+            weight_decay=0.01,
+            warmup_steps=100,
+            logging_steps=10,
+            save_steps=100,
+            eval_steps=50,
+            save_total_limit=2,
+            fp16=True,
+            eval_accumulation_steps=32,
+            use_wandb=True,
+            run_name="kyrgyz-spellcheck-gemma-full"
+        )
+    )
 
 
 def main():
@@ -62,8 +99,16 @@ def main():
     # Set GPU visibility to use only GPU 2
     os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
-    # Create configuration
-    config = create_default_config()
+    # Choose configuration type
+    # Set use_full_finetuning = True to train without PEFT
+    use_full_finetuning = True
+
+    if use_full_finetuning:
+        logger.info("Using full fine-tuning configuration (no PEFT)")
+        config = create_full_finetuning_config()
+    else:
+        logger.info("Using PEFT (LoRA) configuration")
+        config = create_default_config()
 
     # Initialize trainer
     trainer = KyrgyzSpellCheckTrainer(config)
@@ -71,7 +116,6 @@ def main():
     try:
         # Run training/evaluation
         trainer.train()
-
 
     except Exception as e:
         logger.error(f"Training failed with error: {e}")

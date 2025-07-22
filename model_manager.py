@@ -36,7 +36,7 @@ class ModelManager:
         return self.tokenizer
 
     def setup_model(self):
-        """Initialize the model with LoRA configuration."""
+        """Initialize the model with optional LoRA configuration."""
         logger.info(f"Loading model: {self.config.model.model_name}")
 
         # Load model with quantization if specified
@@ -58,21 +58,32 @@ class ModelManager:
             **model_kwargs
         )
 
-        # Setup LoRA configuration
-        lora_config = LoraConfig(
-            r=self.config.lora.r,
-            lora_alpha=self.config.lora.lora_alpha,
-            target_modules=self.config.lora.target_modules,
-            lora_dropout=self.config.lora.lora_dropout,
-            bias=self.config.lora.bias,
-            task_type=TaskType.CAUSAL_LM,
-        )
+        # Apply LoRA only if use_peft is True
+        if self.config.model.use_peft:
+            # Setup LoRA configuration
+            lora_config = LoraConfig(
+                r=self.config.lora.r,
+                lora_alpha=self.config.lora.lora_alpha,
+                target_modules=self.config.lora.target_modules,
+                lora_dropout=self.config.lora.lora_dropout,
+                bias=self.config.lora.bias,
+                task_type=TaskType.CAUSAL_LM,
+            )
 
-        # Apply LoRA
-        self.model = get_peft_model(self.model, lora_config)
-        self.model.print_trainable_parameters()
+            # Apply LoRA
+            self.model = get_peft_model(self.model, lora_config)
+            self.model.print_trainable_parameters()
+            logger.info("Model setup complete with LoRA configuration")
+        else:
+            # Full fine-tuning: make all parameters trainable
+            for param in self.model.parameters():
+                param.requires_grad = True
 
-        logger.info("Model setup complete with LoRA configuration")
+            total_params = sum(p.numel() for p in self.model.parameters())
+            trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            logger.info(f"Full fine-tuning mode: {trainable_params:,} trainable params out of {total_params:,} total params (100%)")
+            logger.info("Model setup complete for full fine-tuning")
+
         return self.model
     
     def inference(self, text: str, max_new_tokens: int = 200) -> str:

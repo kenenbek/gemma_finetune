@@ -13,6 +13,7 @@ class ModelConfig:
     max_length: int = 256
     use_quantization: bool = False
     attn_implementation: str = "eager"
+    use_peft: bool = True  # Flag to enable/disable PEFT training
 
 
 @dataclass
