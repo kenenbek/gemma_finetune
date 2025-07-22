@@ -76,7 +76,7 @@ def create_full_finetuning_config():
         training=TrainingConfig(
             output_dir="./kyrgyz_spellcheck_model_full",
             num_train_epochs=100,  # Fewer epochs for full fine-tuning
-            per_device_train_batch_size=4,  # Smaller batch size due to memory requirements
+            per_device_train_batch_size=1,  # Smaller batch size due to memory requirements
             per_device_eval_batch_size=64,
             gradient_accumulation_steps=8,  # Higher accumulation to simulate larger batches
             learning_rate=5e-7,  # Much lower learning rate for full fine-tuning
@@ -84,7 +84,7 @@ def create_full_finetuning_config():
             warmup_steps=100,
             logging_steps=100,
             save_steps=200,
-            eval_steps=200,
+            eval_steps=2,
             save_total_limit=4,
             fp16=True,
             eval_accumulation_steps=32,
