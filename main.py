@@ -70,7 +70,7 @@ def create_full_finetuning_config():
         data=DataConfig(
             dataset_path="../misspelled_kg_dataset/",
             num_samples=None,  # Smaller dataset for full fine-tuning due to memory constraints
-            max_val_samples=None,
+            max_val_samples=2048,
             max_length=256
         ),
         training=TrainingConfig(
@@ -78,13 +78,13 @@ def create_full_finetuning_config():
             num_train_epochs=100,  # Fewer epochs for full fine-tuning
             per_device_train_batch_size=1,  # Smaller batch size due to memory requirements
             per_device_eval_batch_size=8,
-            gradient_accumulation_steps=64,  # Higher accumulation to simulate larger batches
+            gradient_accumulation_steps=128,  # Higher accumulation to simulate larger batches
             learning_rate=5e-7,  # Much lower learning rate for full fine-tuning
             weight_decay=0.01,
             warmup_steps=100,
             logging_steps=100,
             save_steps=200,
-            eval_steps=2,
+            eval_steps=200,
             save_total_limit=4,
             fp16=True,
             eval_accumulation_steps=32,
