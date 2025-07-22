@@ -98,14 +98,14 @@ class KyrgyzSpellCheckTrainer:
             preprocess_logits_for_metrics=self.evaluator.preprocess_logits_for_metrics,
         )
 
-        # # Start training (uncomment to enable actual training)
-        # logger.info("Starting training...")
-        # trainer.train()
-        #
-        # # Save the final model
-        # logger.info("Saving final model...")
-        # trainer.save_model()
-        # tokenizer.save_pretrained(self.config.training.output_dir)
+        # Start training (uncomment to enable actual training)
+        logger.info("Starting training...")
+        trainer.train()
+
+        # Save the final model
+        logger.info("Saving final model...")
+        trainer.save_model()
+        tokenizer.save_pretrained(self.config.training.output_dir)
 
         # Final evaluation
         logger.info("Running final evaluation...")
