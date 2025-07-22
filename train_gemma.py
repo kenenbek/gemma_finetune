@@ -273,7 +273,6 @@ class KyrgyzSpellCheckTrainer:
     def compute_metrics(self, eval_pred):
         """Compute evaluation metrics."""
         predictions, labels = eval_pred
-        print(predictions.shape, labels.shape, "predictions and labels shapes")
 
         # Handle predictions - they might be logits, so convert to token IDs
         if predictions.ndim > 2 or predictions.dtype != np.int64:
@@ -349,22 +348,31 @@ class KyrgyzSpellCheckTrainer:
             preprocess_logits_for_metrics=preprocess_logits_for_metrics,
         )
 
-        # Start training
-        logger.info("Starting training...")
-        trainer.train()
-
-        # Save the final model
-        logger.info("Saving final model...")
-        trainer.save_model()
-        self.tokenizer.save_pretrained(self.config.training.output_dir)
+        # # Start training
+        # logger.info("Starting training...")
+        # trainer.train()
+        #
+        # # Save the final model
+        # logger.info("Saving final model...")
+        # trainer.save_model()
+        # self.tokenizer.save_pretrained(self.config.training.output_dir)
 
         # Final evaluation
         logger.info("Running final evaluation...")
         eval_results = trainer.evaluate()
         logger.info(f"Final evaluation results: {eval_results}")
 
-        # Test evaluation
-        test_results = trainer.evaluate(eval_dataset=self.test_dataset)
+        # Test evaluation - create a separate trainer for test dataset
+        logger.info("Running test evaluation...")
+        test_trainer = SFTTrainer(
+            model=self.model,
+            args=sft_config,
+            train_dataset=self.train_dataset,  # Required but not used for evaluation
+            eval_dataset=self.test_dataset,    # Use test dataset as eval dataset
+            compute_metrics=self.compute_metrics,
+            preprocess_logits_for_metrics=preprocess_logits_for_metrics,
+        )
+        test_results = test_trainer.evaluate()
         logger.info(f"Test results: {test_results}")
 
         # Save training config
@@ -391,9 +399,7 @@ class KyrgyzSpellCheckTrainer:
             outputs = self.model.generate(
                 **inputs,
                 max_new_tokens=max_new_tokens,
-                do_sample=True,
-                temperature=0.0,
-                top_p=0.9,
+                do_sample=False,  # Use greedy decoding for deterministic results
                 pad_token_id=self.tokenizer.eos_token_id
             )
 
@@ -428,7 +434,7 @@ def main():
         ),
         data=DataConfig(
             dataset_path="../misspelled_kg_dataset/",
-            num_samples=32,  # Increased samples for better training
+            num_samples=4,  # Increased samples for better training
             max_length=256
         ),
         training=TrainingConfig(
@@ -456,24 +462,6 @@ def main():
 
     # Run training
     trainer.train()
-
-    # Example inference
-    print("\n" + "="*50)
-    print("TESTING INFERENCE")
-    print("="*50)
-
-    test_texts = [
-        "Кыргызстан менин мекеним",
-        "Биз достубуз болобуз",
-        "Эртен мектепке барамын"
-    ]
-
-    for text in test_texts:
-        corrected = trainer.inference(text)
-        print(f"Original: {text}")
-        print(f"Corrected: {corrected}")
-        print("-" * 30)
-
 
 if __name__ == "__main__":
     main()
