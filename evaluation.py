@@ -6,6 +6,13 @@ import logging
 import numpy as np
 import jiwer
 
+# Add wandb import (optional)
+try:
+    import wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    _WANDB_AVAILABLE = False
+
 logger = logging.getLogger(__name__)
 
 
@@ -53,11 +60,17 @@ class EvaluationMetrics:
         overall_cer = jiwer.cer(decoded_labels, decoded_preds)
         overall_wer = jiwer.wer(decoded_labels, decoded_preds)
 
-        return {
-            "CER": overall_cer,
-            "WER": overall_wer
+        metrics = {
+            "val_CER": overall_cer,
+            "val_WER": overall_wer
         }
-    
+
+        # Report to wandb if available and initialized
+        if _WANDB_AVAILABLE and wandb.run is not None:
+            wandb.log(metrics)
+
+        return metrics
+
     @staticmethod
     def preprocess_logits_for_metrics(logits, labels):
         """Preprocess logits for metrics computation."""
