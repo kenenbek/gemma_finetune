@@ -69,8 +69,8 @@ def create_full_finetuning_config():
         lora=LoRAConfig(),  # Still needed for config structure but won't be used
         data=DataConfig(
             dataset_path="../misspelled_kg_dataset/",
-            num_samples=None,  # Smaller dataset for full fine-tuning due to memory constraints
-            max_val_samples=None,
+            num_samples=64,  # Smaller dataset for full fine-tuning due to memory constraints
+            max_val_samples=64,
             max_length=256
         ),
         training=TrainingConfig(
