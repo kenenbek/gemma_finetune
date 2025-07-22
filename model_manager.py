@@ -58,7 +58,7 @@ class ModelManager:
             self.config.model.model_name,
             **model_kwargs
         )
-        print(model.hf_device_map)
+        print(self.model.hf_device_map)
 
         # Apply LoRA only if use_peft is True
         if self.config.model.use_peft:
