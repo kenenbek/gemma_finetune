@@ -32,12 +32,18 @@ class ModelManager:
         num_gpus = min(torch.cuda.device_count(), self.config.model.num_pipeline_stages)
         logger.info(f"Setting up pipeline parallelism across {num_gpus} GPUs")
 
+        # Check GPU memory
+        for i in range(num_gpus):
+            memory_gb = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+            logger.info(f"GPU {i}: {memory_gb:.1f}GB total memory")
+
         if num_gpus == 1:
             return {"": 0}
 
         # For Gemma-3-1B, which has 26 layers (0-25)
         total_layers = 26
         layers_per_gpu = total_layers // num_gpus
+        remainder = total_layers % num_gpus
 
         device_map = {}
 
@@ -46,11 +52,16 @@ class ModelManager:
         device_map["model.rotary_emb"] = 0
         device_map["model.rotary_emb_local"] = 0
 
-        # Distribute transformer layers across GPUs
-        # With 4 GPUs: GPU0: 0-6, GPU1: 7-12, GPU2: 13-19, GPU3: 20-25
-        for i in range(total_layers):
-            gpu_id = min(i // layers_per_gpu, num_gpus - 1)
-            device_map[f"model.layers.{i}"] = gpu_id
+        # Distribute transformer layers more evenly
+        current_layer = 0
+        for gpu_id in range(num_gpus):
+            # Add one extra layer to first 'remainder' GPUs
+            layers_on_this_gpu = layers_per_gpu + (1 if gpu_id < remainder else 0)
+
+            for _ in range(layers_on_this_gpu):
+                if current_layer < total_layers:
+                    device_map[f"model.layers.{current_layer}"] = gpu_id
+                    current_layer += 1
 
         # Final layers on last GPU
         device_map["model.norm"] = num_gpus - 1
@@ -58,8 +69,9 @@ class ModelManager:
 
         logger.info(f"Created custom device map for {num_gpus} GPUs:")
         for gpu in range(num_gpus):
-            layers_on_gpu = [i for i in range(total_layers) if i // layers_per_gpu == gpu or (i // layers_per_gpu >= num_gpus - 1 and gpu == num_gpus - 1)]
-            logger.info(f"  GPU {gpu}: layers {min(layers_on_gpu)}-{max(layers_on_gpu)} ({len(layers_on_gpu)} layers)")
+            layers_on_gpu = [key for key, device in device_map.items() if device == gpu and "layers" in key]
+            other_components = [key for key, device in device_map.items() if device == gpu and "layers" not in key]
+            logger.info(f"  GPU {gpu}: {len(layers_on_gpu)} layers + {other_components}")
 
         return device_map
 
@@ -79,8 +91,16 @@ class ModelManager:
         """Initialize the model with optional LoRA configuration."""
         logger.info(f"Loading model: {self.config.model.model_name}")
 
+        # Clear GPU cache first
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            logger.info("Cleared GPU cache")
+
         # Determine device mapping strategy
         if self.config.model.use_pipeline_parallelism:
+            logger.info(f"Pipeline parallelism enabled with {self.config.model.num_pipeline_stages} stages")
+            logger.info(f"Device map strategy: {self.config.model.device_map_strategy}")
+
             if self.config.model.device_map_strategy == "custom":
                 device_map = self._create_pipeline_device_map()
             elif self.config.model.device_map_strategy == "balanced":
@@ -90,11 +110,13 @@ class ModelManager:
         else:
             device_map = "auto"
 
-        # Load model with quantization if specified
+        # Load model with optimized settings for pipeline parallelism
         model_kwargs = {
             "attn_implementation": self.config.model.attn_implementation,
             "device_map": device_map,
             "torch_dtype": torch.float16,  # Use fp16 for better memory efficiency
+            "low_cpu_mem_usage": True,  # Important for multi-GPU loading
+            "max_memory": self._get_max_memory() if self.config.model.use_pipeline_parallelism else None,
         }
 
         # Disable quantization for pipeline parallelism as it can cause issues
@@ -109,6 +131,8 @@ class ModelManager:
         elif self.config.model.use_quantization and self.config.model.use_pipeline_parallelism:
             logger.warning("Quantization disabled for pipeline parallelism to avoid compatibility issues")
 
+        logger.info(f"Loading model with device_map: {device_map}")
+
         self.model = AutoModelForCausalLM.from_pretrained(
             self.config.model.model_name,
             **model_kwargs
@@ -116,6 +140,14 @@ class ModelManager:
 
         if hasattr(self.model, 'hf_device_map'):
             logger.info(f"Model device map: {self.model.hf_device_map}")
+
+            # Log memory usage per GPU
+            if torch.cuda.is_available():
+                for i in range(torch.cuda.device_count()):
+                    allocated = torch.cuda.memory_allocated(i) / (1024**3)
+                    reserved = torch.cuda.memory_reserved(i) / (1024**3)
+                    total = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+                    logger.info(f"GPU {i}: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved, {total:.1f}GB total")
 
         # Apply LoRA only if use_peft is True
         if self.config.model.use_peft:
@@ -177,3 +209,20 @@ class ModelManager:
             return corrected
         except:
             return response
+
+    def _get_max_memory(self):
+        """Get maximum memory allocation per GPU for pipeline parallelism."""
+        if not torch.cuda.is_available():
+            return None
+
+        max_memory = {}
+        num_gpus = min(torch.cuda.device_count(), self.config.model.num_pipeline_stages)
+
+        for i in range(num_gpus):
+            # Reserve some memory for training overhead and gradients
+            # Use 85% of available memory per GPU
+            total_memory = torch.cuda.get_device_properties(i).total_memory
+            max_memory[i] = int(total_memory * 0.85)
+
+        logger.info(f"Max memory allocation: {max_memory}")
+        return max_memory
