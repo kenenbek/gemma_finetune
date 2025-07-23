@@ -64,32 +64,36 @@ def create_full_finetuning_config():
             max_length=256,
             use_quantization=False,
             attn_implementation="eager",
-            use_peft=False  # Disable PEFT for full fine-tuning
+            use_peft=False,  # Disable PEFT for full fine-tuning
+            # Enable pipeline parallelism for 4-GPU cluster
+            use_pipeline_parallelism=True,
+            num_pipeline_stages=4,
+            device_map_strategy="balanced"  # Use balanced for optimal automatic distribution
         ),
         lora=LoRAConfig(),  # Still needed for config structure but won't be used
         data=DataConfig(
             dataset_path="../misspelled_kg_dataset/",
-            num_samples=None,  # Smaller dataset for full fine-tuning due to memory constraints
-            max_val_samples=2048,
+            num_samples=64,  # Use full dataset for better training
+            max_val_samples=4,
             max_length=256
         ),
         training=TrainingConfig(
-            output_dir="./kyrgyz_spellcheck_model_full",
-            num_train_epochs=100,  # Fewer epochs for full fine-tuning
-            per_device_train_batch_size=1,  # Smaller batch size due to memory requirements
-            per_device_eval_batch_size=8,
-            gradient_accumulation_steps=128,  # Higher accumulation to simulate larger batches
+            output_dir="./spellcheck_model_full_pipeline",
+            num_train_epochs=3,
+            per_device_train_batch_size=2,  # Slightly larger batch size with pipeline parallelism
+            per_device_eval_batch_size=4,
+            gradient_accumulation_steps=1,  # Reduced due to larger batch size
             learning_rate=5e-7,  # Much lower learning rate for full fine-tuning
             weight_decay=0.01,
             warmup_steps=100,
             logging_steps=100,
-            save_steps=200,
-            eval_steps=100,
+            save_steps=2,
+            eval_steps=2,
             save_total_limit=4,
             fp16=True,
             eval_accumulation_steps=32,
             use_wandb=True,
-            run_name="kyrgyz-spellcheck-gemma-full"
+            run_name="spellcheck-gemma-full-pipeline"
         )
     )
 

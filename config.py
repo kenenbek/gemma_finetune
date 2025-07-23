@@ -14,6 +14,10 @@ class ModelConfig:
     use_quantization: bool = False
     attn_implementation: str = "eager"
     use_peft: bool = True  # Flag to enable/disable PEFT training
+    # Pipeline parallelism settings
+    use_pipeline_parallelism: bool = False
+    num_pipeline_stages: int = 4  # Number of GPUs for pipeline parallelism
+    device_map_strategy: str = "auto"  # "auto", "custom", "balanced"
 
 
 @dataclass
