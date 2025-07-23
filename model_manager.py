@@ -47,27 +47,34 @@ class ModelManager:
 
         device_map = {}
 
-        # Embedding layers on first GPU
-        device_map["model.embed_tokens"] = 0
+        # Place embedding and lm_head on the same GPU to avoid tied parameter issues
+        # We'll put them on the last GPU along with the final layers
+        last_gpu = num_gpus - 1
+
+        # Rotary embeddings on first GPU
         device_map["model.rotary_emb"] = 0
         device_map["model.rotary_emb_local"] = 0
 
-        # Distribute transformer layers more evenly
+        # Distribute transformer layers, leaving more room on last GPU for embeddings and lm_head
         current_layer = 0
         for gpu_id in range(num_gpus):
-            # Add one extra layer to first 'remainder' GPUs
-            layers_on_this_gpu = layers_per_gpu + (1 if gpu_id < remainder else 0)
+            if gpu_id == last_gpu:
+                # Last GPU gets fewer transformer layers to make room for embeddings and lm_head
+                layers_on_this_gpu = total_layers - current_layer
+            else:
+                layers_on_this_gpu = layers_per_gpu + (1 if gpu_id < remainder else 0)
 
             for _ in range(layers_on_this_gpu):
                 if current_layer < total_layers:
                     device_map[f"model.layers.{current_layer}"] = gpu_id
                     current_layer += 1
 
-        # Final layers on last GPU
-        device_map["model.norm"] = num_gpus - 1
-        device_map["lm_head"] = num_gpus - 1
+        # Place embeddings and language modeling head on the same GPU (last GPU)
+        device_map["model.embed_tokens"] = last_gpu
+        device_map["model.norm"] = last_gpu
+        device_map["lm_head"] = last_gpu
 
-        logger.info(f"Created custom device map for {num_gpus} GPUs:")
+        logger.info(f"Created custom device map for {num_gpus} GPUs (embeddings and lm_head on same GPU):")
         for gpu in range(num_gpus):
             layers_on_gpu = [key for key, device in device_map.items() if device == gpu and "layers" in key]
             other_components = [key for key, device in device_map.items() if device == gpu and "layers" not in key]
@@ -268,4 +275,3 @@ class ModelManager:
 
         logger.info(f"Conservative max memory allocation: {conservative_max_memory}")
         return conservative_max_memory
-
