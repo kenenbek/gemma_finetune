@@ -101,23 +101,31 @@ class ModelManager:
             logger.info(f"Pipeline parallelism enabled with {self.config.model.num_pipeline_stages} stages")
             logger.info(f"Device map strategy: {self.config.model.device_map_strategy}")
 
-            if self.config.model.device_map_strategy == "custom":
+            # Force custom mapping for better control
+            if self.config.model.device_map_strategy in ["balanced", "auto"]:
+                logger.info("Forcing custom device mapping due to HuggingFace allocation issues")
                 device_map = self._create_pipeline_device_map()
-            elif self.config.model.device_map_strategy == "balanced":
-                device_map = "balanced"
+            elif self.config.model.device_map_strategy == "custom":
+                device_map = self._create_pipeline_device_map()
             else:
-                device_map = "auto"
+                device_map = self._create_pipeline_device_map()
         else:
             device_map = "auto"
 
         # Load model with optimized settings for pipeline parallelism
         model_kwargs = {
             "attn_implementation": self.config.model.attn_implementation,
-            "device_map": device_map,
             "torch_dtype": torch.float16,  # Use fp16 for better memory efficiency
             "low_cpu_mem_usage": True,  # Important for multi-GPU loading
-            "max_memory": self._get_max_memory() if self.config.model.use_pipeline_parallelism else None,
         }
+
+        # Add device_map only if it's not a string (i.e., custom mapping)
+        if isinstance(device_map, dict):
+            model_kwargs["device_map"] = device_map
+            # Set a more conservative max_memory for custom mapping
+            model_kwargs["max_memory"] = self._get_conservative_max_memory()
+        else:
+            model_kwargs["device_map"] = device_map
 
         # Disable quantization for pipeline parallelism as it can cause issues
         if self.config.model.use_quantization and not self.config.model.use_pipeline_parallelism:
@@ -132,14 +140,30 @@ class ModelManager:
             logger.warning("Quantization disabled for pipeline parallelism to avoid compatibility issues")
 
         logger.info(f"Loading model with device_map: {device_map}")
+        logger.info(f"Model kwargs: {list(model_kwargs.keys())}")
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            self.config.model.model_name,
-            **model_kwargs
-        )
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model.model_name,
+                **model_kwargs
+            )
+        except Exception as e:
+            logger.error(f"Failed to load model with pipeline parallelism: {e}")
+            logger.info("Falling back to single GPU loading...")
+            # Fallback to single GPU
+            fallback_kwargs = {
+                "attn_implementation": self.config.model.attn_implementation,
+                "torch_dtype": torch.float16,
+                "device_map": "auto",
+                "low_cpu_mem_usage": True,
+            }
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.config.model.model_name,
+                **fallback_kwargs
+            )
 
         if hasattr(self.model, 'hf_device_map'):
-            logger.info(f"Model device map: {self.model.hf_device_map}")
+            logger.info(f"Final model device map: {self.model.hf_device_map}")
 
             # Log memory usage per GPU
             if torch.cuda.is_available():
@@ -147,7 +171,8 @@ class ModelManager:
                     allocated = torch.cuda.memory_allocated(i) / (1024**3)
                     reserved = torch.cuda.memory_reserved(i) / (1024**3)
                     total = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-                    logger.info(f"GPU {i}: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved, {total:.1f}GB total")
+                    if allocated > 0:
+                        logger.info(f"GPU {i}: {allocated:.1f}GB allocated, {reserved:.1f}GB reserved, {total:.1f}GB total")
 
         # Apply LoRA only if use_peft is True
         if self.config.model.use_peft:
@@ -226,3 +251,21 @@ class ModelManager:
 
         logger.info(f"Max memory allocation: {max_memory}")
         return max_memory
+
+    def _get_conservative_max_memory(self):
+        """Get conservative memory allocation per GPU for custom device mapping."""
+        if not torch.cuda.is_available():
+            return None
+
+        conservative_max_memory = {}
+        num_gpus = min(torch.cuda.device_count(), self.config.model.num_pipeline_stages)
+
+        for i in range(num_gpus):
+            # Reserve more memory for training overhead and gradients
+            # Use 75% of available memory per GPU as a conservative estimate
+            total_memory = torch.cuda.get_device_properties(i).total_memory
+            conservative_max_memory[i] = int(total_memory * 0.75)
+
+        logger.info(f"Conservative max memory allocation: {conservative_max_memory}")
+        return conservative_max_memory
+
