@@ -38,7 +38,7 @@ def create_balanced_device_map(num_gpus=4):
     # CRITICAL: In Gemma models, embed_tokens and lm_head share weights (tied parameters)
     # They MUST be on the same device to avoid the tied parameter conflict
     logger.info(f"Total layers: {total_layers}, layers per GPU: {layers_per_gpu}, remainder: {remainder}")
-    logger.info("⚠️  IMPORTANT: Placing tied parameters (embed_tokens & lm_head) on same GPU to avoid conflicts")
+    logger.info("️IMPORTANT: Placing tied parameters (embed_tokens & lm_head) on same GPU to avoid conflicts")
 
     # Strategy: Place both embeddings and lm_head on the last GPU
     # This leaves more room on other GPUs for transformer layers
@@ -68,10 +68,10 @@ def create_balanced_device_map(num_gpus=4):
     for gpu_id in range(num_gpus):
         if gpu_id == tied_param_gpu:
             # Last GPU gets fewer layers since it has embeddings + lm_head
-            layers_on_this_gpu = max(1, layers_per_gpu - 1)  # At least 1 layer, but fewer than others
+            layers_on_this_gpu = max(1, layers_per_gpu - 2)  # At least 1 layer, but fewer than others
         else:
             # Other GPUs get their fair share plus some from the reserved space
-            extra_layers = (layers_per_gpu + 1 - max(1, layers_per_gpu - 1)) // (num_gpus - 1)
+            extra_layers = (layers_per_gpu + 1 - max(1, layers_per_gpu - 2)) // (num_gpus - 1)
             layers_on_this_gpu = layers_per_gpu + (1 if gpu_id < remainder else 0) + extra_layers
 
         layer_start = current_layer
