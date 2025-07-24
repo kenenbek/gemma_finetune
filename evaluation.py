@@ -65,7 +65,7 @@ class EvaluationMetrics:
             "val_WER": overall_wer
         }
 
-        wandb.log(metrics)
+        #wandb.log(metrics)
 
         return metrics
 
