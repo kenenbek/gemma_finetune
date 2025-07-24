@@ -4,6 +4,7 @@ Test script to verify balanced pipeline parallelism setup for Gemma-3 models.
 This version uses a balanced device mapping strategy that distributes components
 more evenly across GPUs for better memory utilization.
 """
+from transformers import AutoConfig
 
 import torch
 import logging
@@ -187,10 +188,9 @@ def test_pipeline_parallelism():
         max_memory = {}
         for i in range(min(4, num_gpus)):
             total_memory = torch.cuda.get_device_properties(i).total_memory
-            # Use 70% instead of 75% to be more conservative
-            max_memory[i] = int(total_memory * 0.70)
+            max_memory[i] = int(total_memory * 0.75)
 
-        logger.info(f"Max memory per GPU (70% of total): {max_memory}")
+        logger.info(f"Max memory per GPU (75% of total): {max_memory}")
 
         # Log memory in GB for readability
         for i, mem in max_memory.items():
