@@ -4,6 +4,8 @@ Model setup and management utilities for Gemma fine-tuning.
 
 import torch
 import logging
+
+from torch.xpu import device
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -22,23 +24,14 @@ class ModelManager:
         self.config = config
         self.tokenizer = None
         self.model = None
-    
-    def _create_pipeline_device_map(self):
-        """Create custom device map for pipeline parallelism."""
-        if not torch.cuda.is_available():
-            logger.warning("CUDA not available, falling back to CPU")
-            return "cpu"
 
-        num_gpus = min(torch.cuda.device_count(), self.config.model.num_pipeline_stages)
-        logger.info(f"Setting up pipeline parallelism across {num_gpus} GPUs")
-
-        # Check GPU memory
-        for i in range(num_gpus):
-            memory_gb = torch.cuda.get_device_properties(i).total_memory / (1024**3)
-            logger.info(f"GPU {i}: {memory_gb:.1f}GB total memory")
-
-        if num_gpus == 1:
-            return {"": 0}
+    def _create_balanced_device_map(self, num_gpus=4):
+        """
+        Create balanced device map for Gemma-3-1B.
+        This strategy distributes components more evenly across GPUs for better balance.
+        IMPORTANT: Places tied parameters (embed_tokens and lm_head) on the same GPU.
+        """
+        logger.info(f"Creating balanced device map for {num_gpus} GPUs...")
 
         # For Gemma-3-1B, which has 26 layers (0-25)
         total_layers = 26
@@ -47,34 +40,105 @@ class ModelManager:
 
         device_map = {}
 
-        # Place embedding and lm_head on the same GPU to avoid tied parameter issues
-        # We'll put them on the last GPU along with the final layers
-        last_gpu = num_gpus - 1
+        # CRITICAL: In Gemma models, embed_tokens and lm_head share weights (tied parameters)
+        # They MUST be on the same device to avoid the tied parameter conflict
+        logger.info(f"Total layers: {total_layers}, layers per GPU: {layers_per_gpu}, remainder: {remainder}")
+        logger.info("️IMPORTANT: Placing tied parameters (embed_tokens & lm_head) on same GPU to avoid conflicts")
 
-        # Rotary embeddings on first GPU
-        device_map["model.rotary_emb"] = 0
-        device_map["model.rotary_emb_local"] = 0
+        # Strategy: Place both embeddings and lm_head on the last GPU
+        # This leaves more room on other GPUs for transformer layers
+        tied_param_gpu = num_gpus - 1  # Use last GPU for tied parameters
 
-        # Distribute transformer layers, leaving more room on last GPU for embeddings and lm_head
+        # Place embeddings and related components on the tied parameter GPU
+        device_map["model.embed_tokens"] = tied_param_gpu
+        device_map["model.rotary_emb"] = tied_param_gpu
+        device_map["model.norm"] = tied_param_gpu
+        device_map["lm_head"] = tied_param_gpu
+
+        # Also place rotary_emb_local if it exists (this fixes the CUDA graph warning)
+        device_map["model.rotary_emb_local"] = tied_param_gpu
+
+        logger.info(f"Placing tied parameters on GPU {tied_param_gpu}:")
+        logger.info(f"  - model.embed_tokens -> GPU {tied_param_gpu}")
+        logger.info(f"  - lm_head -> GPU {tied_param_gpu}")
+        logger.info(f"  - model.norm -> GPU {tied_param_gpu}")
+        logger.info(f"  - model.rotary_emb -> GPU {tied_param_gpu}")
+        logger.info(f"  - model.rotary_emb_local -> GPU {tied_param_gpu}")
+
+        # Distribute transformer layers across all GPUs, but reserve space on last GPU
+        # Since the last GPU has the heavy embedding/lm_head components, give it fewer layers
         current_layer = 0
+        assigned_layers = []  # Track which layers we've assigned
+
         for gpu_id in range(num_gpus):
-            if gpu_id == last_gpu:
-                # Last GPU gets fewer transformer layers to make room for embeddings and lm_head
-                layers_on_this_gpu = total_layers - current_layer
+            if gpu_id == tied_param_gpu:
+                # Last GPU gets fewer layers since it has embeddings + lm_head
+                layers_on_this_gpu = max(1, layers_per_gpu - 2)  # At least 1 layer, but fewer than others
             else:
-                layers_on_this_gpu = layers_per_gpu + (1 if gpu_id < remainder else 0)
+                # Other GPUs get their fair share plus some from the reserved space
+                extra_layers = (layers_per_gpu + 1 - max(1, layers_per_gpu - 2)) // (num_gpus - 1)
+                layers_on_this_gpu = layers_per_gpu + (1 if gpu_id < remainder else 0) + extra_layers
+
+            layer_start = current_layer
+            gpu_layers = []  # Track layers assigned to this GPU
 
             for _ in range(layers_on_this_gpu):
                 if current_layer < total_layers:
                     device_map[f"model.layers.{current_layer}"] = gpu_id
+                    assigned_layers.append(current_layer)
+                    gpu_layers.append(current_layer)
                     current_layer += 1
 
-        # Place embeddings and language modeling head on the same GPU (last GPU)
-        device_map["model.embed_tokens"] = last_gpu
-        device_map["model.norm"] = last_gpu
-        device_map["lm_head"] = last_gpu
+            logger.info(f"GPU {gpu_id}: layers {gpu_layers} ({len(gpu_layers)} layers)")
 
-        logger.info(f"Created custom device map for {num_gpus} GPUs (embeddings and lm_head on same GPU):")
+        # Assign any remaining layers to the first few GPUs
+        remaining_gpu = 0
+        while current_layer < total_layers:
+            if remaining_gpu != tied_param_gpu:  # Don't overload the tied parameter GPU
+                device_map[f"model.layers.{current_layer}"] = remaining_gpu
+                assigned_layers.append(current_layer)
+                logger.info(f"GPU {remaining_gpu}: added remaining layer {current_layer}")
+                current_layer += 1
+            remaining_gpu = (remaining_gpu + 1) % num_gpus
+
+        # VALIDATION: Ensure all layers are assigned
+        expected_layers = list(range(total_layers))
+        assigned_layers_sorted = sorted(assigned_layers)
+
+        logger.info(f"Validation: Expected layers: {expected_layers}")
+        logger.info(f"Validation: Assigned layers: {assigned_layers_sorted}")
+
+        if assigned_layers_sorted == expected_layers:
+            logger.info("✅ VALIDATION PASSED: All layers properly assigned!")
+        else:
+            missing_layers = set(expected_layers) - set(assigned_layers)
+            extra_layers = set(assigned_layers) - set(expected_layers)
+
+            if missing_layers:
+                logger.error(f"❌ VALIDATION FAILED: Missing layers: {sorted(missing_layers)}")
+            if extra_layers:
+                logger.error(f"❌ VALIDATION FAILED: Extra layers: {sorted(extra_layers)}")
+
+            raise ValueError(f"Layer assignment validation failed! Missing: {missing_layers}, Extra: {extra_layers}")
+
+        # Additional validation: Check for duplicates
+        if len(assigned_layers) != len(set(assigned_layers)):
+            duplicates = [layer for layer in assigned_layers if assigned_layers.count(layer) > 1]
+            logger.error(f"❌ VALIDATION FAILED: Duplicate layer assignments: {duplicates}")
+            raise ValueError(f"Duplicate layer assignments found: {duplicates}")
+
+        # Validate tied parameters are on same device
+        embed_device = device_map["model.embed_tokens"]
+        lm_head_device = device_map["lm_head"]
+        if embed_device != lm_head_device:
+            logger.error(
+                f"❌ TIED PARAMETER VALIDATION FAILED: embed_tokens on GPU {embed_device}, lm_head on GPU {lm_head_device}")
+            raise ValueError(
+                f"Tied parameters must be on same device! embed_tokens: {embed_device}, lm_head: {lm_head_device}")
+        else:
+            logger.info(f"✅ TIED PARAMETER VALIDATION PASSED: Both on GPU {embed_device}")
+
+        logger.info(f"Created balanced device map with tied parameter fix:")
         for gpu in range(num_gpus):
             layers_on_gpu = [key for key, device in device_map.items() if device == gpu and "layers" in key]
             other_components = [key for key, device in device_map.items() if device == gpu and "layers" not in key]
@@ -104,35 +168,21 @@ class ModelManager:
             logger.info("Cleared GPU cache")
 
         # Determine device mapping strategy
+        device_map = None
         if self.config.model.use_pipeline_parallelism:
             logger.info(f"Pipeline parallelism enabled with {self.config.model.num_pipeline_stages} stages")
             logger.info(f"Device map strategy: {self.config.model.device_map_strategy}")
 
-            # Force custom mapping for better control
-            if self.config.model.device_map_strategy in ["balanced", "auto"]:
-                logger.info("Forcing custom device mapping due to HuggingFace allocation issues")
-                device_map = self._create_pipeline_device_map()
-            elif self.config.model.device_map_strategy == "custom":
-                device_map = self._create_pipeline_device_map()
-            else:
-                device_map = self._create_pipeline_device_map()
-        else:
-            device_map = "auto"
+            device_map = self._create_balanced_device_map(num_gpus=self.config.model.num_pipeline_stages)
+
 
         # Load model with optimized settings for pipeline parallelism
         model_kwargs = {
             "attn_implementation": self.config.model.attn_implementation,
-            "torch_dtype": torch.float16,  # Use fp16 for better memory efficiency
-            "low_cpu_mem_usage": True,  # Important for multi-GPU loading
+            "torch_dtype": torch.float16,
+            "low_cpu_mem_usage": True,
+            "device_map": device_map,
         }
-
-        # Add device_map only if it's not a string (i.e., custom mapping)
-        if isinstance(device_map, dict):
-            model_kwargs["device_map"] = device_map
-            # Set a more conservative max_memory for custom mapping
-            model_kwargs["max_memory"] = self._get_conservative_max_memory()
-        else:
-            model_kwargs["device_map"] = device_map
 
         # Disable quantization for pipeline parallelism as it can cause issues
         if self.config.model.use_quantization and not self.config.model.use_pipeline_parallelism:

@@ -68,7 +68,7 @@ def create_full_finetuning_config():
             # Enable pipeline parallelism for 4-GPU cluster
             use_pipeline_parallelism=True,
             num_pipeline_stages=4,
-            device_map_strategy="balanced"  # Use balanced for optimal automatic distribution
+            device_map_strategy="custom"
         ),
         lora=LoRAConfig(),  # Still needed for config structure but won't be used
         data=DataConfig(
