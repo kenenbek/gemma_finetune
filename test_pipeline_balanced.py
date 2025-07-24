@@ -43,11 +43,15 @@ def create_balanced_device_map(num_gpus=4):
     device_map["model.norm"] = tied_param_gpu
     device_map["lm_head"] = tied_param_gpu
 
+    # Also place rotary_emb_local if it exists (this fixes the CUDA graph warning)
+    device_map["model.rotary_emb_local"] = tied_param_gpu
+
     logger.info(f"Placing tied parameters on GPU {tied_param_gpu}:")
     logger.info(f"  - model.embed_tokens -> GPU {tied_param_gpu}")
     logger.info(f"  - lm_head -> GPU {tied_param_gpu}")
     logger.info(f"  - model.norm -> GPU {tied_param_gpu}")
     logger.info(f"  - model.rotary_emb -> GPU {tied_param_gpu}")
+    logger.info(f"  - model.rotary_emb_local -> GPU {tied_param_gpu}")
 
     # Distribute transformer layers across all GPUs, but reserve space on last GPU
     # Since the last GPU has the heavy embedding/lm_head components, give it fewer layers
