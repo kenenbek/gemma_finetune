@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Test script to verify pipeline parallelism setup before running full training.
+Test script to verify balanced pipeline parallelism setup for Gemma-3 models.
+This version uses a balanced device mapping strategy that distributes components
+more evenly across GPUs for better memory utilization.
 """
 
 import torch
@@ -48,7 +50,7 @@ def test_pipeline_parallelism():
         # Load model with custom device mapping
         model = AutoModelForCausalLM.from_pretrained(
             "google/gemma-3-1b-it",
-            device_map="auto",
+            device_map="balanced",
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
             max_memory=max_memory,
@@ -114,4 +116,5 @@ if __name__ == "__main__":
         logger.info("✅ Pipeline parallelism test PASSED!")
     else:
         logger.error("❌ Pipeline parallelism test FAILED!")
+
 
