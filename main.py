@@ -86,7 +86,7 @@ def create_full_finetuning_config():
             learning_rate=5e-7,  # Much lower learning rate for full fine-tuning
             weight_decay=0.01,
             warmup_steps=100,
-            logging_steps=0,
+            logging_steps=-1,
             save_steps=2,
             eval_steps=2,
             save_total_limit=4,
