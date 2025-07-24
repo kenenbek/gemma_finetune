@@ -13,6 +13,12 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+# Enable TensorFloat32 for better performance on A10G and other modern GPUs
+# This fixes the TF32 warning and provides better performance
+torch.set_float32_matmul_precision('high')
+logger.info("✅ TensorFloat32 enabled for better GPU performance")
+
+
 def create_balanced_device_map(num_gpus=4):
     """
     Create balanced device map for Gemma-3-1B.
