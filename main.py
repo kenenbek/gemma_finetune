@@ -90,7 +90,7 @@ def create_full_finetuning_config():
             save_steps=2,
             eval_steps=2,
             save_total_limit=4,
-            fp16=True,
+            fp16=False,
             eval_accumulation_steps=32,
             use_wandb=True,
             run_name="spellcheck-gemma-full-pipeline"
