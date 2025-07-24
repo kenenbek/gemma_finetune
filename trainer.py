@@ -54,7 +54,7 @@ class KyrgyzSpellCheckTrainer:
             fp16=self.config.training.fp16,
             dataloader_drop_last=False,
             eval_accumulation_steps=self.config.training.eval_accumulation_steps,
-            report_to="wandb" if self.config.training.use_wandb else None,
+            report_to=None,
             run_name=self.config.training.run_name,
             # SFT specific parameters
             max_seq_length=self.config.data.max_length,

@@ -65,9 +65,7 @@ class EvaluationMetrics:
             "val_WER": overall_wer
         }
 
-        # Report to wandb if available and initialized
-        if _WANDB_AVAILABLE and wandb.run is not None:
-            wandb.log(metrics)
+        wandb.log(metrics)
 
         return metrics
 
