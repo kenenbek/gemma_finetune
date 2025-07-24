@@ -49,6 +49,8 @@ class EvaluationMetrics:
             # Decode predictions and labels
             decoded_preds = self.tokenizer.batch_decode(predictions, skip_special_tokens=True)
             decoded_labels = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
+            print(decoded_preds)
+            print(decoded_labels)
         except Exception as e:
             logger.warning(f"Error decoding predictions/labels: {e}")
             # Return basic metrics if decoding fails
@@ -65,7 +67,7 @@ class EvaluationMetrics:
             "val_WER": overall_wer
         }
 
-        #wandb.log(metrics)
+        wandb.log(metrics)
 
         return metrics
 
