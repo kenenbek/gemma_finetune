@@ -81,7 +81,7 @@ def create_full_finetuning_config():
             output_dir="./spellcheck_model_full_pipeline",
             num_train_epochs=3,
             per_device_train_batch_size=2,  # Slightly larger batch size with pipeline parallelism
-            per_device_eval_batch_size=4,
+            per_device_eval_batch_size=1,
             gradient_accumulation_steps=1,  # Reduced due to larger batch size
             learning_rate=5e-7,  # Much lower learning rate for full fine-tuning
             weight_decay=0.01,
