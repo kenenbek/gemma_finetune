@@ -13,10 +13,106 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
+def create_balanced_device_map(num_gpus=4):
+    """
+    Create balanced device map for Gemma-3-1B.
+    This strategy distributes components more evenly across GPUs for better balance.
+    """
+    logger.info(f"Creating balanced device map for {num_gpus} GPUs...")
+
+    # For Gemma-3-1B, which has 26 layers (0-25)
+    total_layers = 26
+    layers_per_gpu = total_layers // num_gpus
+    remainder = total_layers % num_gpus
+
+    device_map = {}
+
+    # Balanced strategy: distribute embeddings, layers, and output head across GPUs
+    logger.info(f"Total layers: {total_layers}, layers per GPU: {layers_per_gpu}, remainder: {remainder}")
+
+    # Place embeddings on first GPU
+    device_map["model.embed_tokens"] = 0
+    device_map["model.rotary_emb"] = 0
+    logger.info(f"Placing embeddings on GPU 0")
+
+    # Distribute transformer layers evenly across all GPUs
+    current_layer = 0
+    assigned_layers = []  # Track which layers we've assigned
+
+    for gpu_id in range(num_gpus):
+        layers_on_this_gpu = layers_per_gpu + (1 if gpu_id < remainder else 0)
+
+        layer_start = current_layer
+        gpu_layers = []  # Track layers assigned to this GPU
+
+        for _ in range(layers_on_this_gpu):
+            if current_layer < total_layers:
+                device_map[f"model.layers.{current_layer}"] = gpu_id
+                assigned_layers.append(current_layer)
+                gpu_layers.append(current_layer)
+                current_layer += 1
+
+        logger.info(f"GPU {gpu_id}: layers {gpu_layers} ({len(gpu_layers)} layers)")
+
+    # Place norm and lm_head on last GPU
+    last_gpu = num_gpus - 1
+    device_map["model.norm"] = last_gpu
+    device_map["lm_head"] = last_gpu
+    logger.info(f"Placing norm and lm_head on GPU {last_gpu}")
+
+    # VALIDATION: Ensure all layers are assigned
+    expected_layers = list(range(total_layers))
+    assigned_layers_sorted = sorted(assigned_layers)
+
+    logger.info(f"Validation: Expected layers: {expected_layers}")
+    logger.info(f"Validation: Assigned layers: {assigned_layers_sorted}")
+
+    if assigned_layers_sorted == expected_layers:
+        logger.info("✅ VALIDATION PASSED: All layers properly assigned!")
+    else:
+        missing_layers = set(expected_layers) - set(assigned_layers)
+        extra_layers = set(assigned_layers) - set(expected_layers)
+
+        if missing_layers:
+            logger.error(f"❌ VALIDATION FAILED: Missing layers: {sorted(missing_layers)}")
+        if extra_layers:
+            logger.error(f"❌ VALIDATION FAILED: Extra layers: {sorted(extra_layers)}")
+
+        raise ValueError(f"Layer assignment validation failed! Missing: {missing_layers}, Extra: {extra_layers}")
+
+    # Additional validation: Check for duplicates
+    if len(assigned_layers) != len(set(assigned_layers)):
+        duplicates = [layer for layer in assigned_layers if assigned_layers.count(layer) > 1]
+        logger.error(f"❌ VALIDATION FAILED: Duplicate layer assignments: {duplicates}")
+        raise ValueError(f"Duplicate layer assignments found: {duplicates}")
+
+    logger.info(f"Created balanced device map with validation:")
+    for gpu in range(num_gpus):
+        layers_on_gpu = [key for key, device in device_map.items() if device == gpu and "layers" in key]
+        other_components = [key for key, device in device_map.items() if device == gpu and "layers" not in key]
+        logger.info(f"  GPU {gpu}: {len(layers_on_gpu)} layers + {other_components}")
+
+    return device_map
+
+def analyze_memory_requirements():
+    """Analyze memory requirements before loading the model."""
+    logger.info("Analyzing GPU memory state...")
+
+    # Clear cache first
+    torch.cuda.empty_cache()
+
+    # Log initial memory state
+    for i in range(torch.cuda.device_count()):
+        props = torch.cuda.get_device_properties(i)
+        total_memory = props.total_memory / (1024**3)
+        allocated = torch.cuda.memory_allocated(i) / (1024**3)
+        cached = torch.cuda.memory_reserved(i) / (1024**3)
+        free = total_memory - allocated - cached
+        logger.info(f"GPU {i}: {free:.1f}GB free, {allocated:.1f}GB allocated, {cached:.1f}GB cached")
 
 def test_pipeline_parallelism():
     """Test pipeline parallelism setup."""
-    logger.info("Testing pipeline parallelism setup...")
+    logger.info("Testing balanced pipeline parallelism setup...")
 
     # Check CUDA availability
     if not torch.cuda.is_available():
@@ -32,89 +128,161 @@ def test_pipeline_parallelism():
         memory_gb = props.total_memory / (1024 ** 3)
         logger.info(f"GPU {i}: {props.name}, {memory_gb:.1f}GB")
 
-    # Clear cache
-    torch.cuda.empty_cache()
+    # Analyze memory before starting
+    analyze_memory_requirements()
 
-    # Test custom device mapping strategy
+    # Test balanced device mapping strategy
     logger.info(f"\n=== Testing balanced device mapping ===")
 
     try:
-        # Set conservative max memory per GPU (75% of total)
+        # Create ACTUAL balanced device map (not just a string)
+        balanced_device_map = create_balanced_device_map(min(4, num_gpus))
+        logger.info(f"Balanced device map created: {balanced_device_map}")
+
+        # Set memory limits - be more conservative to avoid allocation issues
         max_memory = {}
         for i in range(min(4, num_gpus)):
             total_memory = torch.cuda.get_device_properties(i).total_memory
-            max_memory[i] = int(total_memory * 0.75)
+            # Use 70% instead of 75% to be more conservative
+            max_memory[i] = int(total_memory * 0.70)
 
-        logger.info(f"Conservative max memory per GPU: {max_memory}")
+        logger.info(f"Max memory per GPU (70% of total): {max_memory}")
 
-        # Load model with custom device mapping
+        # Log memory in GB for readability
+        for i, mem in max_memory.items():
+            mem_gb = mem / (1024**3)
+            logger.info(f"  GPU {i}: {mem_gb:.1f}GB max allowed")
+
+        logger.info("Loading model with balanced device mapping...")
+
+        # Load model with ACTUAL balanced device mapping (not string "balanced")
         model = AutoModelForCausalLM.from_pretrained(
             "google/gemma-3-1b-it",
-            device_map="balanced",
+            device_map=balanced_device_map,  # Use actual device map, not string
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
             max_memory=max_memory,
             attn_implementation="eager"
         )
 
-        logger.info(f"Model loaded successfully with custom device mapping!")
-        logger.info(f"Device map: {model.hf_device_map}")
+        logger.info(f"Model loaded successfully with balanced device mapping!")
+        logger.info(f"Actual device map used by model: {model.hf_device_map}")
 
         # Check if model is actually distributed
         devices_used = set(model.hf_device_map.values())
         logger.info(f"Model distributed across {len(devices_used)} devices: {devices_used}")
 
-        # Check memory usage
-        for i in range(num_gpus):
-            if torch.cuda.memory_allocated(i) > 0:
-                allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)
-                total = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
-                logger.info(f"GPU {i}: {allocated:.1f}GB / {total:.1f}GB used ({allocated / total * 100:.1f}%)")
+        # Verify the mapping matches our expectation
+        if len(devices_used) > 1:
+            logger.info("✅ Model successfully distributed across multiple GPUs!")
+        else:
+            logger.warning("⚠️ Model ended up on single GPU despite balanced mapping attempt")
 
-        # Test a simple forward pass
+        # Check memory usage after model loading
+        logger.info("Memory usage after model loading:")
+        gpu_usage = {}
+        total_memory_used = 0
+        for i in range(num_gpus):
+            allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)
+            total = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
+            cached = torch.cuda.memory_reserved(i) / (1024 ** 3)
+            if allocated > 0 or cached > 0:
+                usage_pct = allocated/total*100
+                gpu_usage[i] = usage_pct
+                total_memory_used += allocated
+                logger.info(f"GPU {i}: {allocated:.1f}GB allocated, {cached:.1f}GB cached / {total:.1f}GB total ({usage_pct:.1f}%)")
+
+        logger.info(f"Total memory used across all GPUs: {total_memory_used:.1f}GB")
+
+        # Calculate balance metrics if multiple GPUs are used
+        if len(gpu_usage) > 1:
+            avg_usage = sum(gpu_usage.values()) / len(gpu_usage)
+            max_usage = max(gpu_usage.values())
+            min_usage = min(gpu_usage.values())
+            balance_score = 100 - ((max_usage - min_usage) / avg_usage * 100) if avg_usage > 0 else 0
+
+            logger.info(f"Memory Balance Analysis:")
+            logger.info(f"  Average usage: {avg_usage:.1f}%")
+            logger.info(f"  Max usage: {max_usage:.1f}%")
+            logger.info(f"  Min usage: {min_usage:.1f}%")
+            logger.info(f"  Balance score: {balance_score:.1f}% (higher is better)")
+
+        # Load tokenizer
+        logger.info("Loading tokenizer...")
         tokenizer = AutoTokenizer.from_pretrained("google/gemma-3-1b-it")
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
 
-        test_input = "Hello, this is a test."
+        # Prepare test input
+        test_input = "Hello, this is a test of balanced pipeline parallelism."
         inputs = tokenizer(test_input, return_tensors="pt")
+        logger.info(f"Test input: '{test_input}'")
+        logger.info(f"Tokenized input shape: {inputs['input_ids'].shape}")
 
-        # Move inputs to first device (GPU 0)
-        inputs = {k: v.to(0) for k, v in inputs.items()}
+        # Determine where to send inputs based on where embeddings are located
+        embed_device = model.hf_device_map.get("model.embed_tokens", 0)
+        logger.info(f"Embeddings are located on device: {embed_device}")
+        logger.info(f"Moving inputs to device {embed_device}...")
 
+        # Move inputs to the device where embeddings are located
+        inputs = {k: v.to(embed_device) for k, v in inputs.items()}
+        logger.info(f"Inputs successfully moved to device {embed_device}")
+
+        # Test forward pass
+        logger.info("Running forward pass...")
         with torch.no_grad():
             outputs = model(**inputs)
             logger.info(f"Forward pass successful! Output shape: {outputs.logits.shape}")
+            logger.info(f"Output tensor is on device: {outputs.logits.device}")
 
         # Test generation
+        logger.info("Testing text generation...")
         with torch.no_grad():
             generated = model.generate(
                 **inputs,
-                max_new_tokens=10,
-                do_sample=False,
+                max_new_tokens=20,
+                do_sample=True,
+                temperature=0.7,
                 pad_token_id=tokenizer.eos_token_id
             )
             generated_text = tokenizer.decode(generated[0], skip_special_tokens=True)
-            logger.info(f"Generation test successful! Generated: '{generated_text[:100]}...'")
+            logger.info(f"Generation successful!")
+            logger.info(f"Generated text: '{generated_text}'")
+
+        # Final memory check
+        logger.info("Final memory usage:")
+        for i in range(num_gpus):
+            allocated = torch.cuda.memory_allocated(i) / (1024 ** 3)
+            if allocated > 0:
+                total = torch.cuda.get_device_properties(i).total_memory / (1024 ** 3)
+                logger.info(f"GPU {i}: {allocated:.1f}GB / {total:.1f}GB ({allocated/total*100:.1f}%)")
 
         # Clean up
         del model
         torch.cuda.empty_cache()
-        logger.info(f"Custom device mapping test completed successfully!")
+        logger.info(f"Balanced device mapping test completed successfully!")
 
         return True
 
     except Exception as e:
-        logger.error(f"Failed with custom device mapping: {e}")
+        logger.error(f"Failed with balanced device mapping: {e}")
+        import traceback
+        logger.error("Full traceback:")
+        logger.error(traceback.format_exc())
+
+        # Log which device each component ended up on for debugging
+        try:
+            if 'model' in locals():
+                logger.error(f"Model device map at time of error: {model.hf_device_map}")
+        except:
+            pass
+
         torch.cuda.empty_cache()
         return False
-
 
 if __name__ == "__main__":
     success = test_pipeline_parallelism()
     if success:
-        logger.info("✅ Pipeline parallelism test PASSED!")
+        logger.info("✅ Balanced pipeline parallelism test PASSED!")
     else:
-        logger.error("❌ Pipeline parallelism test FAILED!")
-
-
+        logger.error("❌ Balanced pipeline parallelism test FAILED!")
