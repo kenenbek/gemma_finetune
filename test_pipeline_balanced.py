@@ -48,7 +48,7 @@ def test_pipeline_parallelism():
         # Load model with custom device mapping
         model = AutoModelForCausalLM.from_pretrained(
             "google/gemma-3-1b-it",
-            device_map="balanced",
+            device_map="auto",
             torch_dtype=torch.float16,
             low_cpu_mem_usage=True,
             max_memory=max_memory,
