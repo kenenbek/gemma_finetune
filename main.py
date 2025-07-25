@@ -66,7 +66,7 @@ def create_full_finetuning_config():
             attn_implementation="eager",
             use_peft=False,  # Disable PEFT for full fine-tuning
             # Enable pipeline parallelism for 4-GPU cluster
-            use_pipeline_parallelism=True,
+            use_pipeline_parallelism=False,
             num_pipeline_stages=4,
             device_map_strategy="custom"
         ),
