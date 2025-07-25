@@ -8,10 +8,11 @@ import logging
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
-    BitsAndBytesConfig
 )
 from peft import LoraConfig, get_peft_model, TaskType
+from accelerate import Accelerator
 from config import ExperimentConfig
+from accelerate_pipeline import AcceleratePipelineManager
 
 logger = logging.getLogger(__name__)
 
@@ -174,49 +175,19 @@ class ModelManager:
 
             device_map = self._create_balanced_device_map(num_gpus=self.config.model.num_pipeline_stages)
 
-
-        # Load model with optimized settings for pipeline parallelism
         model_kwargs = {
             "attn_implementation": self.config.model.attn_implementation,
-            "torch_dtype": torch.float16,
             "low_cpu_mem_usage": True,
             "device_map": device_map,
         }
 
-        # Disable quantization for pipeline parallelism as it can cause issues
-        if self.config.model.use_quantization and not self.config.model.use_pipeline_parallelism:
-            quantization_config = BitsAndBytesConfig(
-                load_in_4bit=True,
-                bnb_4bit_compute_dtype=torch.float16,
-                bnb_4bit_use_double_quant=True,
-                bnb_4bit_quant_type="nf4"
-            )
-            model_kwargs["quantization_config"] = quantization_config
-        elif self.config.model.use_quantization and self.config.model.use_pipeline_parallelism:
-            logger.warning("Quantization disabled for pipeline parallelism to avoid compatibility issues")
-
         logger.info(f"Loading model with device_map: {device_map}")
         logger.info(f"Model kwargs: {list(model_kwargs.keys())}")
 
-        try:
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.config.model.model_name,
-                **model_kwargs
-            )
-        except Exception as e:
-            logger.error(f"Failed to load model with pipeline parallelism: {e}")
-            logger.info("Falling back to single GPU loading...")
-            # Fallback to single GPU
-            fallback_kwargs = {
-                "attn_implementation": self.config.model.attn_implementation,
-                "torch_dtype": torch.float16,
-                "device_map": "auto",
-                "low_cpu_mem_usage": True,
-            }
-            self.model = AutoModelForCausalLM.from_pretrained(
-                self.config.model.model_name,
-                **fallback_kwargs
-            )
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.config.model.model_name,
+            **model_kwargs
+        )
 
         if hasattr(self.model, 'hf_device_map'):
             logger.info(f"Final model device map: {self.model.hf_device_map}")
@@ -246,23 +217,64 @@ class ModelManager:
             self.model = get_peft_model(self.model, lora_config)
             self.model.print_trainable_parameters()
             logger.info("Model setup complete with LoRA configuration")
-        elif self.config.model.use_minimal_training:
-            # Minimal training mode: freeze almost all parameters for CPU debugging
-            logger.info("Applying minimal training mode for CPU debugging")
-            self._apply_minimal_training_freeze()
-            logger.info("Model setup complete with minimal training configuration")
         else:
-            # Full fine-tuning: make all parameters trainable
-            for param in self.model.parameters():
-                param.requires_grad = True
+            # Apply selective layer freezing if enabled
+            if self.config.model.freeze_layers:
+                logger.info("Applying selective layer freezing for Gemma model")
+                self._apply_gemma_layer_freeze()
 
             total_params = sum(p.numel() for p in self.model.parameters())
             trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-            logger.info(f"Full fine-tuning mode: {trainable_params:,} trainable params out of {total_params:,} total params (100%)")
-            logger.info("Model setup complete for full fine-tuning")
+            percentage_trainable = (trainable_params / total_params) * 100
+            logger.info(f"Training mode: {trainable_params:,} trainable params out of {total_params:,} total params ({percentage_trainable:.2f}%)")
+            logger.info("Model setup complete for fine-tuning with selective freezing" if self.config.model.freeze_layers else "Model setup complete for full fine-tuning")
 
         return self.model
-    
+
+    def setup_accelerate_pipeline_model(self):
+        """Initialize the model using Accelerate pipeline parallelism."""
+        logger.info("Setting up model with Accelerate pipeline parallelism")
+
+        if not self.config.model.use_pipeline_parallelism:
+            logger.warning("Pipeline parallelism not enabled in config, falling back to regular setup")
+            return self.setup_model()
+
+        # Initialize Accelerate pipeline manager
+        pipeline_manager = AcceleratePipelineManager(
+            model_name=self.config.model.model_name,
+            num_stages=self.config.model.num_pipeline_stages
+        )
+
+        # Setup accelerator
+        accelerator = pipeline_manager.setup_accelerator()
+
+        # Setup model and tokenizer with pipeline parallelism
+        self.model, self.tokenizer = pipeline_manager.setup_model_and_tokenizer()
+
+        # Log pipeline information
+        pipeline_manager.log_pipeline_info()
+
+        # Apply LoRA or layer freezing if needed
+        if self.config.model.use_peft:
+            logger.info("Applying LoRA to pipeline model")
+            lora_config = LoraConfig(
+                r=self.config.lora.r,
+                lora_alpha=self.config.lora.lora_alpha,
+                target_modules=self.config.lora.target_modules,
+                lora_dropout=self.config.lora.lora_dropout,
+                bias=self.config.lora.bias,
+                task_type=TaskType.CAUSAL_LM,
+            )
+            self.model = get_peft_model(self.model, lora_config)
+            self.model.print_trainable_parameters()
+
+        elif self.config.model.freeze_layers:
+            logger.info("Applying selective layer freezing to pipeline model")
+            self._apply_gemma_layer_freeze()
+
+        logger.info("Accelerate pipeline model setup complete")
+        return self.model, accelerator, pipeline_manager
+
     def inference(self, text: str, max_new_tokens: int = 200) -> str:
         """Run inference on a single text."""
         if self.model is None or self.tokenizer is None:
@@ -330,109 +342,48 @@ class ModelManager:
         logger.info(f"Conservative max memory allocation: {conservative_max_memory}")
         return conservative_max_memory
 
-    def _apply_minimal_training_freeze(self):
+    def _apply_gemma_layer_freeze(self):
         """
-        Freeze almost all parameters, keeping only 0.001% trainable for CPU debugging.
-        This method strategically selects a tiny subset of parameters to remain trainable.
+        Apply selective layer freezing for Gemma3 model.
+        Freezes everything except the last transformer layer (layer 25).
         """
-        if self.model is None:
-            raise ValueError("Model must be loaded before applying minimal training freeze")
+        logger.info("🧊 Freezing everything except the last transformer layer of Gemma3 model...")
 
-        logger.info(f"Applying minimal training freeze (keeping {self.config.model.minimal_training_percent}% trainable)")
-
-        # First, freeze all parameters
-        for param in self.model.parameters():
+        # Freeze embeddings
+        for param in self.model.model.embed_tokens.parameters():
             param.requires_grad = False
+        for param in self.model.model.rotary_emb.parameters():
+            param.requires_grad = False
+        for param in self.model.model.rotary_emb_local.parameters():
+            param.requires_grad = False
+        logger.info("❄️ Frozen embeddings (embed_tokens, rotary_emb, rotary_emb_local)")
 
-        # Count total parameters
+        # Freeze LM head
+        for param in self.model.lm_head.parameters():
+            param.requires_grad = False
+        logger.info("❄️ Frozen lm_head")
+
+        # Freeze final layer norm
+        for param in self.model.model.norm.parameters():
+            param.requires_grad = False
+        logger.info("❄️ Frozen final layer norm")
+
+        # Freeze first 25 layers (0-24), keep layer 25 trainable
+        for layer_idx in range(25):
+            for param in self.model.model.layers[layer_idx].parameters():
+                param.requires_grad = False
+        logger.info("❄️ Frozen transformer layers 0-24")
+
+        # Last layer (25) remains trainable by default
+        trainable_params_last_layer = sum(p.numel() for p in self.model.model.layers[25].parameters())
+        logger.info(f"🔥 Layer 25 remains trainable ({trainable_params_last_layer:,} parameters)")
+
+        # Calculate statistics
         total_params = sum(p.numel() for p in self.model.parameters())
-        target_trainable = max(1, int(total_params * (self.config.model.minimal_training_percent / 100)))
+        trainable_params = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        percentage_trainable = (trainable_params / total_params) * 100
 
-        logger.info(f"Total parameters: {total_params:,}")
-        logger.info(f"Target trainable parameters: {target_trainable:,}")
+        logger.info("🧊 ✅ Layer freezing complete!")
+        logger.info(f"📊 Total: {total_params:,} | Trainable: {trainable_params:,} ({percentage_trainable:.2f}%)")
 
-        # Strategy: Unfreeze only the final layer norm and a small portion of the last transformer layer
-        # This gives us meaningful gradients while keeping the parameter count minimal
-        trainable_count = 0
-
-        # 1. Unfreeze final layer norm (small but important for output)
-        if hasattr(self.model, 'model') and hasattr(self.model.model, 'norm'):
-            for param in self.model.model.norm.parameters():
-                if trainable_count + param.numel() <= target_trainable:
-                    param.requires_grad = True
-                    trainable_count += param.numel()
-                    logger.info(f"Unfroze model.norm: {param.numel():,} parameters")
-
-        # 2. Unfreeze bias terms from the last few transformer layers (if they exist and fit in budget)
-        if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
-            # Start from the last layer and work backwards
-            for layer_idx in reversed(range(len(self.model.model.layers))):
-                if trainable_count >= target_trainable:
-                    break
-
-                layer = self.model.model.layers[layer_idx]
-
-                # Try to unfreeze bias parameters first (they're small but effective)
-                for name, module in layer.named_modules():
-                    if trainable_count >= target_trainable:
-                        break
-                    if hasattr(module, 'bias') and module.bias is not None:
-                        if trainable_count + module.bias.numel() <= target_trainable:
-                            module.bias.requires_grad = True
-                            trainable_count += module.bias.numel()
-                            logger.info(f"Unfroze layer {layer_idx}.{name}.bias: {module.bias.numel():,} parameters")
-
-                # If we still have budget, unfreeze small weight matrices
-                if trainable_count < target_trainable:
-                    for name, param in layer.named_parameters():
-                        if trainable_count >= target_trainable:
-                            break
-                        if param.requires_grad:  # Skip already unfrozen
-                            continue
-                        if trainable_count + param.numel() <= target_trainable:
-                            # Prioritize smaller matrices like layer norms
-                            if 'norm' in name.lower() or param.numel() < 1000:
-                                param.requires_grad = True
-                                trainable_count += param.numel()
-                                logger.info(f"Unfroze layer {layer_idx}.{name}: {param.numel():,} parameters")
-
-                # If we have enough trainable parameters, stop
-                if trainable_count >= target_trainable * 0.8:  # Allow some flexibility
-                    break
-
-        # 3. If we still need more parameters and have budget, unfreeze lm_head bias
-        if trainable_count < target_trainable and hasattr(self.model, 'lm_head'):
-            if hasattr(self.model.lm_head, 'bias') and self.model.lm_head.bias is not None:
-                if trainable_count + self.model.lm_head.bias.numel() <= target_trainable:
-                    self.model.lm_head.bias.requires_grad = True
-                    trainable_count += self.model.lm_head.bias.numel()
-                    logger.info(f"Unfroze lm_head.bias: {self.model.lm_head.bias.numel():,} parameters")
-
-        # Final count and validation
-        actual_trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
-        actual_percentage = (actual_trainable / total_params) * 100 if total_params > 0 else 0.0
-
-        logger.info(f"✅ Minimal training setup complete:")
-        logger.info(f"  Total parameters: {total_params:,}")
-        logger.info(f"  Trainable parameters: {actual_trainable:,}")
-        logger.info(f"  Percentage trainable: {actual_percentage:.4f}%")
-        logger.info(f"  Frozen parameters: {total_params - actual_trainable:,}")
-
-        # Verify we're within the target (with some tolerance)
-        target_percent = self.config.model.minimal_training_percent
-        if actual_percentage <= target_percent * 2:  # Allow 2x tolerance
-            logger.info(f"✅ Successfully achieved minimal training target ({target_percent}%)")
-        else:
-            logger.warning(f"⚠️ Exceeded target by {actual_percentage - target_percent:.4f}%")
-
-        # Ensure we have at least some trainable parameters
-        if actual_trainable == 0:
-            logger.warning("⚠️ No parameters were unfrozen! This might cause training issues.")
-            # Force unfreeze at least one small parameter as fallback
-            if hasattr(self.model, 'model') and hasattr(self.model.model, 'norm'):
-                for param in self.model.model.norm.parameters():
-                    param.requires_grad = True
-                    logger.info(f"Fallback: Forced unfreezing of model.norm to ensure training can proceed")
-                    break
-
-        return actual_trainable, total_params
+        return trainable_params, total_params

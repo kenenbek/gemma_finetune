@@ -11,16 +11,16 @@ class ModelConfig:
     """Configuration for model settings."""
     model_name: str = "google/gemma-3-1b-it"
     max_length: int = 256
-    use_quantization: bool = False
     attn_implementation: str = "eager"
     use_peft: bool = True  # Flag to enable/disable PEFT training
     # Pipeline parallelism settings
     use_pipeline_parallelism: bool = False
     num_pipeline_stages: int = 4  # Number of GPUs for pipeline parallelism
     device_map_strategy: str = "custom"
-    # Minimal training for debugging
-    use_minimal_training: bool = False  # Train only tiny fraction of parameters
-    minimal_training_percent: float = 0.001  # Percentage of parameters to keep trainable
+    # Accelerate pipeline parallelism settings
+    use_accelerate_pipeline: bool = False  # Use Accelerate for pipeline parallelism
+    # Layer freezing settings
+    freeze_layers: bool = False  # Enable selective layer freezing
 
 
 @dataclass
@@ -68,6 +68,7 @@ class TrainingConfig:
     eval_accumulation_steps: int = 1024
     use_wandb: bool = False
     run_name: str = "kyrgyz-spellcheck-gemma"
+    disable_gradients: bool = False  # Turn off gradient computation for debugging
 
 
 @dataclass
