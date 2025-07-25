@@ -18,6 +18,9 @@ class ModelConfig:
     use_pipeline_parallelism: bool = False
     num_pipeline_stages: int = 4  # Number of GPUs for pipeline parallelism
     device_map_strategy: str = "custom"
+    # Minimal training for debugging
+    use_minimal_training: bool = False  # Train only tiny fraction of parameters
+    minimal_training_percent: float = 0.001  # Percentage of parameters to keep trainable
 
 
 @dataclass

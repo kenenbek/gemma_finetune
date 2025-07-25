@@ -52,6 +52,7 @@ class KyrgyzSpellCheckTrainer:
             remove_unused_columns=False,
             dataloader_pin_memory=False,
             fp16=self.config.training.fp16,
+            bf16=False,
             dataloader_drop_last=False,
             eval_accumulation_steps=self.config.training.eval_accumulation_steps,
             report_to="wandb",

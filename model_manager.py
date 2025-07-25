@@ -5,7 +5,6 @@ Model setup and management utilities for Gemma fine-tuning.
 import torch
 import logging
 
-from torch.xpu import device
 from transformers import (
     AutoTokenizer,
     AutoModelForCausalLM,
@@ -247,6 +246,11 @@ class ModelManager:
             self.model = get_peft_model(self.model, lora_config)
             self.model.print_trainable_parameters()
             logger.info("Model setup complete with LoRA configuration")
+        elif self.config.model.use_minimal_training:
+            # Minimal training mode: freeze almost all parameters for CPU debugging
+            logger.info("Applying minimal training mode for CPU debugging")
+            self._apply_minimal_training_freeze()
+            logger.info("Model setup complete with minimal training configuration")
         else:
             # Full fine-tuning: make all parameters trainable
             for param in self.model.parameters():
@@ -325,3 +329,110 @@ class ModelManager:
 
         logger.info(f"Conservative max memory allocation: {conservative_max_memory}")
         return conservative_max_memory
+
+    def _apply_minimal_training_freeze(self):
+        """
+        Freeze almost all parameters, keeping only 0.001% trainable for CPU debugging.
+        This method strategically selects a tiny subset of parameters to remain trainable.
+        """
+        if self.model is None:
+            raise ValueError("Model must be loaded before applying minimal training freeze")
+
+        logger.info(f"Applying minimal training freeze (keeping {self.config.model.minimal_training_percent}% trainable)")
+
+        # First, freeze all parameters
+        for param in self.model.parameters():
+            param.requires_grad = False
+
+        # Count total parameters
+        total_params = sum(p.numel() for p in self.model.parameters())
+        target_trainable = max(1, int(total_params * (self.config.model.minimal_training_percent / 100)))
+
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(f"Target trainable parameters: {target_trainable:,}")
+
+        # Strategy: Unfreeze only the final layer norm and a small portion of the last transformer layer
+        # This gives us meaningful gradients while keeping the parameter count minimal
+        trainable_count = 0
+
+        # 1. Unfreeze final layer norm (small but important for output)
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'norm'):
+            for param in self.model.model.norm.parameters():
+                if trainable_count + param.numel() <= target_trainable:
+                    param.requires_grad = True
+                    trainable_count += param.numel()
+                    logger.info(f"Unfroze model.norm: {param.numel():,} parameters")
+
+        # 2. Unfreeze bias terms from the last few transformer layers (if they exist and fit in budget)
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
+            # Start from the last layer and work backwards
+            for layer_idx in reversed(range(len(self.model.model.layers))):
+                if trainable_count >= target_trainable:
+                    break
+
+                layer = self.model.model.layers[layer_idx]
+
+                # Try to unfreeze bias parameters first (they're small but effective)
+                for name, module in layer.named_modules():
+                    if trainable_count >= target_trainable:
+                        break
+                    if hasattr(module, 'bias') and module.bias is not None:
+                        if trainable_count + module.bias.numel() <= target_trainable:
+                            module.bias.requires_grad = True
+                            trainable_count += module.bias.numel()
+                            logger.info(f"Unfroze layer {layer_idx}.{name}.bias: {module.bias.numel():,} parameters")
+
+                # If we still have budget, unfreeze small weight matrices
+                if trainable_count < target_trainable:
+                    for name, param in layer.named_parameters():
+                        if trainable_count >= target_trainable:
+                            break
+                        if param.requires_grad:  # Skip already unfrozen
+                            continue
+                        if trainable_count + param.numel() <= target_trainable:
+                            # Prioritize smaller matrices like layer norms
+                            if 'norm' in name.lower() or param.numel() < 1000:
+                                param.requires_grad = True
+                                trainable_count += param.numel()
+                                logger.info(f"Unfroze layer {layer_idx}.{name}: {param.numel():,} parameters")
+
+                # If we have enough trainable parameters, stop
+                if trainable_count >= target_trainable * 0.8:  # Allow some flexibility
+                    break
+
+        # 3. If we still need more parameters and have budget, unfreeze lm_head bias
+        if trainable_count < target_trainable and hasattr(self.model, 'lm_head'):
+            if hasattr(self.model.lm_head, 'bias') and self.model.lm_head.bias is not None:
+                if trainable_count + self.model.lm_head.bias.numel() <= target_trainable:
+                    self.model.lm_head.bias.requires_grad = True
+                    trainable_count += self.model.lm_head.bias.numel()
+                    logger.info(f"Unfroze lm_head.bias: {self.model.lm_head.bias.numel():,} parameters")
+
+        # Final count and validation
+        actual_trainable = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+        actual_percentage = (actual_trainable / total_params) * 100 if total_params > 0 else 0.0
+
+        logger.info(f"✅ Minimal training setup complete:")
+        logger.info(f"  Total parameters: {total_params:,}")
+        logger.info(f"  Trainable parameters: {actual_trainable:,}")
+        logger.info(f"  Percentage trainable: {actual_percentage:.4f}%")
+        logger.info(f"  Frozen parameters: {total_params - actual_trainable:,}")
+
+        # Verify we're within the target (with some tolerance)
+        target_percent = self.config.model.minimal_training_percent
+        if actual_percentage <= target_percent * 2:  # Allow 2x tolerance
+            logger.info(f"✅ Successfully achieved minimal training target ({target_percent}%)")
+        else:
+            logger.warning(f"⚠️ Exceeded target by {actual_percentage - target_percent:.4f}%")
+
+        # Ensure we have at least some trainable parameters
+        if actual_trainable == 0:
+            logger.warning("⚠️ No parameters were unfrozen! This might cause training issues.")
+            # Force unfreeze at least one small parameter as fallback
+            if hasattr(self.model, 'model') and hasattr(self.model.model, 'norm'):
+                for param in self.model.model.norm.parameters():
+                    param.requires_grad = True
+                    logger.info(f"Fallback: Forced unfreezing of model.norm to ensure training can proceed")
+                    break
+
+        return actual_trainable, total_params

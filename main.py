@@ -73,14 +73,14 @@ def create_full_finetuning_config():
         lora=LoRAConfig(),  # Still needed for config structure but won't be used
         data=DataConfig(
             dataset_path="../misspelled_kg_dataset/",
-            num_samples=64,  # Use full dataset for better training
-            max_val_samples=4,
+            num_samples=4,  # Use full dataset for better training
+            max_val_samples=2,
             max_length=256
         ),
         training=TrainingConfig(
             output_dir="./spellcheck_model_full_pipeline",
-            num_train_epochs=3,
-            per_device_train_batch_size=2,  # Slightly larger batch size with pipeline parallelism
+            num_train_epochs=1,
+            per_device_train_batch_size=1,  # Slightly larger batch size with pipeline parallelism
             per_device_eval_batch_size=1,
             gradient_accumulation_steps=1,  # Reduced due to larger batch size
             learning_rate=5e-7,  # Much lower learning rate for full fine-tuning
@@ -98,13 +98,61 @@ def create_full_finetuning_config():
     )
 
 
+def create_cpu_debug_config():
+    """Create configuration for CPU debugging with minimal training."""
+    return ExperimentConfig(
+        model=ModelConfig(
+            model_name="google/gemma-3-1b-it",
+            max_length=128,  # Shorter sequences for faster CPU processing
+            use_quantization=False,  # Disable quantization for CPU
+            attn_implementation="eager",
+            use_peft=False,  # Disable PEFT
+            use_pipeline_parallelism=False,  # Disable pipeline parallelism for CPU
+            use_minimal_training=True,  # Enable minimal training
+            minimal_training_percent=0.00001  # Only 0.001% of parameters trainable
+        ),
+        lora=LoRAConfig(),  # Still needed for config structure but won't be used
+        data=DataConfig(
+            dataset_path="../misspelled_kg_dataset/",
+            num_samples=1,  # Very small dataset for quick debugging
+            max_val_samples=1,  # Small validation set
+            max_length=128
+        ),
+        training=TrainingConfig(
+            output_dir="./debug_model_cpu",
+            num_train_epochs=2,  # Just a few epochs for testing
+            per_device_train_batch_size=1,  # Small batch size for CPU
+            per_device_eval_batch_size=1,
+            gradient_accumulation_steps=1,
+            learning_rate=1e-4,  # Higher learning rate since we're training very few parameters
+            weight_decay=0.01,
+            warmup_steps=5,  # Few warmup steps
+            logging_steps=1,  # Log every step for debugging
+            save_steps=5,
+            eval_steps=5,
+            save_total_limit=2,
+            fp16=False,  # Disable fp16 for CPU
+            eval_accumulation_steps=1,
+            use_wandb=False,  # Disable wandb for debugging
+            run_name="cpu-debug-minimal-training"
+        )
+    )
+
+
 def main():
     """Main function to run the training pipeline."""
     # Choose configuration type
+    # Set use_cpu_debug = True for CPU debugging with minimal training
     # Set use_full_finetuning = True to train without PEFT
+    # Set use_cpu_debug = False and use_full_finetuning = False for default LoRA training
+
+    use_cpu_debug = False  # Set to True for CPU debugging
     use_full_finetuning = True
 
-    if use_full_finetuning:
+    if use_cpu_debug:
+        logger.info("Using CPU debugging configuration with minimal training (0.001% parameters)")
+        config = create_cpu_debug_config()
+    elif use_full_finetuning:
         logger.info("Using full fine-tuning configuration (no PEFT)")
         config = create_full_finetuning_config()
     else:
