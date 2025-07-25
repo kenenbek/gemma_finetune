@@ -48,63 +48,75 @@ class AcceleratePipelineManager:
 
         # GPU pipeline configuration
         total_layers = 26  # layers 0-25
-        layers_per_stage = total_layers // self.num_stages
-        remainder = total_layers % self.num_stages
-        
-        # Pipeline stage assignments
         pipeline_config = {}
-        current_layer = 0
-        
+
         # CRITICAL: Place tied parameters (embed_tokens and lm_head) on the SAME device
         # We'll use the last stage for both to avoid conflicts
         tied_param_stage = self.num_stages - 1
 
-        for stage in range(self.num_stages):
-            # Calculate layers for this stage
-            layers_in_stage = layers_per_stage
-            if stage < remainder:
-                layers_in_stage += 1
-                
-            stage_components = []
-            
-            # Stage 0: Include embeddings (but NOT lm_head)
-            if stage == 0:
-                stage_components.extend([
-                    "model.embed_tokens",
-                    "model.rotary_emb",
-                ])
-                
-            # Add transformer layers (but fewer for the last stage to make room for lm_head)
-            if stage == tied_param_stage:
-                # Last stage gets fewer layers to accommodate lm_head and norm
-                layers_in_stage = max(1, layers_in_stage - 2)
+        # Strategy: Distribute layers evenly, then handle special components
+        layers_per_stage = total_layers // self.num_stages
+        remainder = total_layers % self.num_stages
 
-            for _ in range(layers_in_stage):
+        logger.info(f"Distributing {total_layers} layers across {self.num_stages} stages")
+        logger.info(f"Base layers per stage: {layers_per_stage}, remainder: {remainder}")
+
+        current_layer = 0
+
+        # Distribute transformer layers first
+        for stage in range(self.num_stages):
+            layers_in_this_stage = layers_per_stage
+            if stage < remainder:
+                layers_in_this_stage += 1
+
+            stage_layers = []
+            for _ in range(layers_in_this_stage):
                 if current_layer < total_layers:
-                    stage_components.append(f"model.layers.{current_layer}")
+                    pipeline_config[f"model.layers.{current_layer}"] = stage
+                    stage_layers.append(current_layer)
                     current_layer += 1
                     
-            # Last stage: Include final norm and lm_head (tied with embed_tokens)
-            if stage == tied_param_stage:
-                stage_components.extend([
-                    "model.norm",
-                    "lm_head"  # This MUST be on same device as embed_tokens
-                ])
-                
-            # Assign components to stage
-            for component in stage_components:
-                pipeline_config[component] = stage
-                
-            logger.info(f"Stage {stage}: {len(stage_components)} components")
-            if stage_components:
-                logger.info(f"  Components: {stage_components}")
+            logger.info(f"Stage {stage}: layers {stage_layers} ({len(stage_layers)} layers)")
 
-        # CRITICAL FIX: Move embed_tokens to the same device as lm_head
-        if "model.embed_tokens" in pipeline_config and "lm_head" in pipeline_config:
-            lm_head_device = pipeline_config["lm_head"]
-            pipeline_config["model.embed_tokens"] = lm_head_device
-            logger.info(f"🔧 TIED PARAMETER FIX: Moving embed_tokens to GPU {lm_head_device} (same as lm_head)")
+        # Verify all layers are assigned
+        if current_layer != total_layers:
+            logger.error(f"Layer assignment error: assigned {current_layer} layers, expected {total_layers}")
+            raise ValueError(f"Not all layers assigned! Assigned: {current_layer}, Expected: {total_layers}")
 
+        # Now assign special components
+        # Place embeddings on first stage
+        pipeline_config["model.embed_tokens"] = 0
+        pipeline_config["model.rotary_emb"] = 0
+
+        # Place norm and lm_head on last stage (tied with embed_tokens)
+        pipeline_config["model.norm"] = tied_param_stage
+        pipeline_config["lm_head"] = tied_param_stage
+
+        # CRITICAL FIX: Move embed_tokens to the same device as lm_head for tied parameters
+        pipeline_config["model.embed_tokens"] = tied_param_stage
+        logger.info(f"🔧 TIED PARAMETER FIX: Moving embed_tokens to stage {tied_param_stage} (same as lm_head)")
+
+        # Log final configuration
+        logger.info("=== Final Pipeline Configuration ===")
+        for stage in range(self.num_stages):
+            stage_components = [comp for comp, s in pipeline_config.items() if s == stage]
+            layer_components = [comp for comp in stage_components if "model.layers." in comp]
+            other_components = [comp for comp in stage_components if "model.layers." not in comp]
+
+            logger.info(f"Stage {stage}:")
+            logger.info(f"  - Layers: {len(layer_components)} ({[int(comp.split('.')[2]) for comp in layer_components if comp.startswith('model.layers.')]})")
+            logger.info(f"  - Other: {other_components}")
+
+        # Validation: Check all required components are present
+        required_components = ["model.embed_tokens", "model.rotary_emb", "model.norm", "lm_head"]
+        required_components.extend([f"model.layers.{i}" for i in range(26)])
+
+        missing_components = [comp for comp in required_components if comp not in pipeline_config]
+        if missing_components:
+            logger.error(f"Missing components in device map: {missing_components}")
+            raise ValueError(f"Missing components: {missing_components}")
+
+        logger.info("✅ Pipeline configuration validation passed!")
         return pipeline_config
         
     def setup_accelerator(self) -> Accelerator:
