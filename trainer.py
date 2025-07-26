@@ -79,9 +79,11 @@ class KyrgyzSpellCheckTrainer:
         """Training with Accelerate pipeline parallelism."""
         logger.info("Setting up training with Accelerate pipeline parallelism...")
 
-        # Setup model with Accelerate pipeline
-        model, accelerator, pipeline_manager = self.model_manager.setup_accelerate_pipeline_model()
-        tokenizer = self.model_manager.tokenizer
+        # Setup tokenizer first
+        tokenizer = self.model_manager.setup_tokenizer()
+
+        # Setup model with Accelerate pipeline (returns model and accelerator)
+        model, accelerator = self.model_manager.setup_accelerate_pipeline_model()
 
         # Setup dataset manager and load data
         self.dataset_manager = DatasetManager(self.config, tokenizer)
@@ -176,7 +178,7 @@ class KyrgyzSpellCheckTrainer:
             wandb.init(
                 project="kyrgyz-spellcheck",
                 config=self.config.to_dict(),
-                name=f"gemma-kyrgyz-spellcheck-{self.config.training.num_train_epochs}epochs"
+                name=f"gemma-{self.config.training.num_train_epochs}epochs"
             )
 
         # Setup SFT configuration
@@ -192,6 +194,7 @@ class KyrgyzSpellCheckTrainer:
             preprocess_logits_for_metrics=self.evaluator.preprocess_logits_for_metrics,
         )
 
+        # Train the model
         trainer.train()
 
         # Save the final model
@@ -204,13 +207,13 @@ class KyrgyzSpellCheckTrainer:
         eval_results = trainer.evaluate()
         logger.info(f"Final evaluation results: {eval_results}")
 
-        # Test evaluation - create a separate trainer for test dataset
+        # Test evaluation
         logger.info("Running test evaluation...")
         test_trainer = SFTTrainer(
             model=model,
             args=sft_config,
-            train_dataset=self.train_dataset,  # Required but not used for evaluation
-            eval_dataset=self.test_dataset,    # Use test dataset as eval dataset
+            train_dataset=self.train_dataset,
+            eval_dataset=self.test_dataset,
             compute_metrics=self.evaluator.compute_metrics,
             preprocess_logits_for_metrics=self.evaluator.preprocess_logits_for_metrics,
         )
@@ -226,8 +229,4 @@ class KyrgyzSpellCheckTrainer:
             wandb.log({"final_eval": eval_results, "test_results": test_results})
             wandb.finish()
 
-        logger.info("Training completed successfully!")
-
-    def inference(self, text: str, max_new_tokens: int = 200) -> str:
-        """Run inference on a single text."""
-        return self.model_manager.inference(text, max_new_tokens)
+        logger.info("Standard training completed successfully!")

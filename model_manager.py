@@ -12,18 +12,172 @@ from transformers import (
 from peft import LoraConfig, get_peft_model, TaskType
 from accelerate import Accelerator
 from config import ExperimentConfig
-from accelerate_pipeline import AcceleratePipelineManager
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
 class ModelManager:
-    """Handles model and tokenizer setup with LoRA configuration."""
-    
+    """Handles model and tokenizer setup with LoRA configuration and Accelerate pipeline parallelism."""
+
     def __init__(self, config: ExperimentConfig):
         self.config = config
         self.tokenizer = None
         self.model = None
+        self.accelerator = None
+        self.pipeline_config = None
+
+    def create_accelerate_pipeline_config(self) -> Dict[str, int]:
+        """
+        Create a balanced pipeline configuration for Gemma3-1B-IT using Accelerate.
+        The model has 26 transformer layers (0-25) plus embeddings and head.
+        IMPORTANT: Handles tied parameters (embed_tokens and lm_head) properly.
+        """
+        num_stages = self.config.model.num_pipeline_stages
+        logger.info(f"Creating Accelerate pipeline config for {num_stages} stages")
+
+        # Check if CUDA is available
+        if not torch.cuda.is_available():
+            logger.warning("CUDA not available, using CPU-only device mapping")
+            # For CPU, put everything on device 0
+            pipeline_config = {}
+            pipeline_config["model.embed_tokens"] = 0
+            pipeline_config["model.rotary_emb"] = 0
+            pipeline_config["lm_head"] = 0  # Keep tied parameters on same device
+            pipeline_config["model.norm"] = 0
+
+            # All layers on device 0 for CPU
+            for layer_idx in range(26):
+                pipeline_config[f"model.layers.{layer_idx}"] = 0
+
+            return pipeline_config
+
+        # GPU pipeline configuration
+        total_layers = 26  # layers 0-25
+        pipeline_config = {}
+
+        # CRITICAL: Place tied parameters (embed_tokens and lm_head) on the SAME device
+        # We'll use the last stage for both to avoid conflicts
+        tied_param_stage = num_stages - 1
+
+        # Strategy: Distribute layers evenly, then handle special components
+        layers_per_stage = total_layers // num_stages
+        remainder = total_layers % num_stages
+
+        logger.info(f"Distributing {total_layers} layers across {num_stages} stages")
+        logger.info(f"Base layers per stage: {layers_per_stage}, remainder: {remainder}")
+
+        current_layer = 0
+
+        # Distribute transformer layers first
+        for stage in range(num_stages):
+            layers_in_this_stage = layers_per_stage
+            if stage < remainder:
+                layers_in_this_stage += 1
+
+            stage_layers = []
+            for _ in range(layers_in_this_stage):
+                if current_layer < total_layers:
+                    pipeline_config[f"model.layers.{current_layer}"] = stage
+                    stage_layers.append(current_layer)
+                    current_layer += 1
+
+            logger.info(f"Stage {stage}: layers {stage_layers} ({len(stage_layers)} layers)")
+
+        # Verify all layers are assigned
+        if current_layer != total_layers:
+            logger.error(f"Layer assignment error: assigned {current_layer} layers, expected {total_layers}")
+            raise ValueError(f"Not all layers assigned! Assigned: {current_layer}, Expected: {total_layers}")
+
+        # Now assign special components
+        # Place embeddings on first stage
+        pipeline_config["model.embed_tokens"] = 0
+        pipeline_config["model.rotary_emb"] = 0
+
+        # Place norm and lm_head on last stage (tied with embed_tokens)
+        pipeline_config["model.norm"] = tied_param_stage
+        pipeline_config["lm_head"] = tied_param_stage
+
+        # CRITICAL FIX: Move embed_tokens to the same device as lm_head for tied parameters
+        pipeline_config["model.embed_tokens"] = tied_param_stage
+        logger.info(f"🔧 TIED PARAMETER FIX: Moving embed_tokens to stage {tied_param_stage} (same as lm_head)")
+
+        # Log final configuration
+        logger.info("=== Final Accelerate Pipeline Configuration ===")
+        for stage in range(num_stages):
+            stage_components = [comp for comp, s in pipeline_config.items() if s == stage]
+            layer_components = [comp for comp in stage_components if "model.layers." in comp]
+            other_components = [comp for comp in stage_components if "model.layers." not in comp]
+
+            logger.info(f"Stage {stage}:")
+            logger.info(f"  - Layers: {len(layer_components)} ({[int(comp.split('.')[2]) for comp in layer_components if comp.startswith('model.layers.')]})")
+            logger.info(f"  - Other: {other_components}")
+
+        # Validation: Check all required components are present
+        required_components = ["model.embed_tokens", "model.rotary_emb", "model.norm", "lm_head"]
+        required_components.extend([f"model.layers.{i}" for i in range(26)])
+
+        missing_components = [comp for comp in required_components if comp not in pipeline_config]
+        if missing_components:
+            logger.error(f"Missing components in device map: {missing_components}")
+            raise ValueError(f"Missing components: {missing_components}")
+
+        logger.info("✅ Accelerate pipeline configuration validation passed!")
+        return pipeline_config
+
+    def setup_accelerator(self) -> Accelerator:
+        """Setup Accelerator with mixed precision for pipeline parallelism."""
+        logger.info("Setting up Accelerator for pipeline parallelism")
+
+        # Initialize accelerator with mixed precision
+        self.accelerator = Accelerator(
+            mixed_precision="fp16" if self.config.training.fp16 else "no",
+            gradient_accumulation_steps=self.config.training.gradient_accumulation_steps,
+        )
+
+        logger.info(f"Accelerator initialized with {self.accelerator.num_processes} processes")
+        logger.info(f"Using device: {self.accelerator.device}")
+
+        return self.accelerator
+
+    def get_memory_stats(self) -> Dict[str, float]:
+        """Get memory statistics for each GPU."""
+        if not torch.cuda.is_available():
+            return {}
+
+        stats = {}
+        for i in range(torch.cuda.device_count()):
+            allocated = torch.cuda.memory_allocated(i) / (1024**3)
+            reserved = torch.cuda.memory_reserved(i) / (1024**3)
+            total = torch.cuda.get_device_properties(i).total_memory / (1024**3)
+
+            stats[f"GPU_{i}"] = {
+                "allocated_GB": allocated,
+                "reserved_GB": reserved,
+                "total_GB": total,
+                "utilization_%": (allocated / total) * 100 if total > 0 else 0
+            }
+
+        return stats
+
+    def log_pipeline_info(self):
+        """Log pipeline configuration and memory usage."""
+        logger.info("=== Pipeline Parallelism Configuration ===")
+        logger.info(f"Model: {self.config.model.model_name}")
+        logger.info(f"Pipeline stages: {self.config.model.num_pipeline_stages}")
+
+        if hasattr(self.model, 'hf_device_map'):
+            logger.info("Device map:")
+            for component, device in self.model.hf_device_map.items():
+                logger.info(f"  {component} -> GPU {device}")
+
+        # Memory statistics
+        memory_stats = self.get_memory_stats()
+        if memory_stats:
+            logger.info("\nMemory usage:")
+            for gpu, stats in memory_stats.items():
+                logger.info(f"  {gpu}: {stats['allocated_GB']:.1f}GB allocated "
+                           f"({stats['utilization_%']:.1f}% of {stats['total_GB']:.1f}GB)")
 
     def _create_balanced_device_map(self, num_gpus=4):
         """
@@ -239,20 +393,24 @@ class ModelManager:
             logger.warning("Pipeline parallelism not enabled in config, falling back to regular setup")
             return self.setup_model()
 
-        # Initialize Accelerate pipeline manager
-        pipeline_manager = AcceleratePipelineManager(
-            model_name=self.config.model.model_name,
-            num_stages=self.config.model.num_pipeline_stages
+        # Setup accelerator
+        self.accelerator = self.setup_accelerator()
+
+        # Create pipeline configuration
+        self.pipeline_config = self.create_accelerate_pipeline_config()
+
+        # Initialize model and tokenizer with pipeline parallelism
+        self.model = AutoModelForCausalLM.from_pretrained(
+            self.config.model.model_name,
+            device_map=self.pipeline_config,
+            attn_implementation=self.config.model.attn_implementation,
+            low_cpu_mem_usage=True,
         )
 
-        # Setup accelerator
-        accelerator = pipeline_manager.setup_accelerator()
-
-        # Setup model and tokenizer with pipeline parallelism
-        self.model, self.tokenizer = pipeline_manager.setup_model_and_tokenizer()
+        logger.info("Model and tokenizer setup complete for Accelerate pipeline parallelism")
 
         # Log pipeline information
-        pipeline_manager.log_pipeline_info()
+        self.log_pipeline_info()
 
         # Apply LoRA or layer freezing if needed
         if self.config.model.use_peft:
@@ -273,7 +431,7 @@ class ModelManager:
             self._apply_gemma_layer_freeze()
 
         logger.info("Accelerate pipeline model setup complete")
-        return self.model, accelerator, pipeline_manager
+        return self.model, self.accelerator
 
     def inference(self, text: str, max_new_tokens: int = 200) -> str:
         """Run inference on a single text."""

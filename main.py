@@ -140,6 +140,42 @@ def create_accelerate_pipeline_config():
     )
 
 
+def create_accelerate_config_file(num_gpus: int = 4, output_path: str = "accelerate_config.yaml"):
+    """
+    Create an Accelerate configuration file for pipeline parallelism.
+
+    Args:
+        num_gpus: Number of GPUs to use
+        output_path: Path to save the config file
+    """
+    config_content = f"""compute_environment: LOCAL_MACHINE
+debug: false
+distributed_type: MULTI_GPU
+downcast_bf16: 'no'
+enable_cpu_affinity: false
+gpu_ids: all
+machine_rank: 0
+main_training_function: main
+mixed_precision: fp16
+num_machines: 1
+num_processes: {num_gpus}
+rdzv_backend: static
+same_network: true
+tpu_env: []
+tpu_use_cluster: false
+tpu_use_sudo: false
+use_cpu: false
+"""
+
+    with open(output_path, 'w') as f:
+        f.write(config_content)
+
+    logger.info(f"Accelerate config saved to {output_path}")
+    logger.info("To use this config, run: accelerate launch --config_file accelerate_config.yaml your_script.py")
+
+    return output_path
+
+
 def main():
     """Main function to run the training pipeline."""
     # Choose configuration type
@@ -147,12 +183,14 @@ def main():
     # Set use_full_finetuning = True to train without PEFT
     # Set use_cpu_debug = False and use_full_finetuning = False for default LoRA training
 
-    use_accelerate_pipeline = True  # NEW: Use Accelerate pipeline parallelism
+    use_accelerate_pipeline = True  # Use Accelerate pipeline parallelism
     use_full_finetuning = False
 
     if use_accelerate_pipeline:
         logger.info("Using Accelerate pipeline parallelism configuration")
         config = create_accelerate_pipeline_config()
+        # Create accelerate config file for multi-GPU setup
+        create_accelerate_config_file(num_gpus=config.model.num_pipeline_stages)
     elif use_full_finetuning:
         logger.info("Using full fine-tuning configuration (no PEFT)")
         config = create_full_finetuning_config()
@@ -160,7 +198,7 @@ def main():
         logger.info("Using PEFT (LoRA) configuration")
         config = create_lora_config()
 
-    # Initialize trainer
+    # Initialize trainer with integrated AcceleratePipelineManager functionality
     trainer = KyrgyzSpellCheckTrainer(config)
 
     try:
